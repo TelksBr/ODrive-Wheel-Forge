@@ -139,27 +139,47 @@ Pop-Location
 $msysToolchain = Convert-ToMsysPath $ToolchainBin
 $msysFirmware = Convert-ToMsysPath $firmwareDir
 
-$cmdLines = @(
+# Limpa binários antigos para garantir que nunca aprove binário defasado
+$buildDir = Join-Path $firmwareDir "build"
+$binPath = Join-Path $buildDir "odrive-wheel.bin"
+$elfPath = Join-Path $buildDir "odrive-wheel.elf"
+$hexPath = Join-Path $buildDir "odrive-wheel.hex"
+
+if (Test-Path $binPath) { Remove-Item -Force $binPath }
+if (Test-Path $elfPath) { Remove-Item -Force $elfPath }
+if (Test-Path $hexPath) { Remove-Item -Force $hexPath }
+
+$scriptContent = @(
+  "set -euo pipefail",
   ('export PATH="{0}:/mingw64/bin:/usr/bin:$PATH"' -f $msysToolchain),
   ('cd "{0}"' -f $msysFirmware)
 )
 
 if (-not $NoClean) {
-  $cmdLines += "/mingw64/bin/mingw32-make clean"
+  $scriptContent += "/mingw64/bin/mingw32-make clean"
 }
 
-$cmdLines += '/mingw64/bin/mingw32-make -j$(nproc)'
-$cmd = ($cmdLines -join "`n")
+$scriptContent += '/mingw64/bin/mingw32-make -j$(nproc)'
+
+$tempScript = Join-Path $firmwareDir ".build_runner.sh"
+[System.IO.File]::WriteAllLines($tempScript, $scriptContent)
+$msysScript = Convert-ToMsysPath $tempScript
 
 Write-Host "Running build in $firmwareDir"
-& $MsysBash -lc $cmd
-
-if ($LASTEXITCODE -ne 0) {
-  Write-Error "Build failed with exit code $LASTEXITCODE"
-  exit $LASTEXITCODE
+try {
+  & $MsysBash $msysScript
+  $buildExitCode = $LASTEXITCODE
+} finally {
+  if (Test-Path $tempScript) {
+    Remove-Item -Force $tempScript
+  }
 }
 
-$binPath = Join-Path $firmwareDir "build\odrive-wheel.bin"
+if ($buildExitCode -ne 0) {
+  Write-Error "Build failed with exit code $buildExitCode"
+  exit $buildExitCode
+}
+
 if (!(Test-Path $binPath)) {
   Write-Error "Missing build output: $binPath"
   exit 1
