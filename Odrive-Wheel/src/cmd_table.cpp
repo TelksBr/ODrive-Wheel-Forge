@@ -459,6 +459,17 @@ static int h_axis_invert(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     snprintf(r, s, "%d", ffb_get_axis_invert());
     return 0;
 }
+
+extern "C" int  ffb_get_ffb_invert(void);
+extern "C" void ffb_set_ffb_invert(int v);
+static int h_axis_ffbinvert(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) {
+        int val = parse_long(v, ffb_get_ffb_invert()) ? 1 : 0;
+        ffb_set_ffb_invert(val);
+    }
+    snprintf(r, s, "%d", ffb_get_ffb_invert());
+    return 0;
+}
 static int h_axis_drvtype(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     (void)v;
     if (t == CMD_TYPE_EXEC) { snprintf(r, s, "5:ODrive (M0)"); return 0; }
@@ -821,6 +832,77 @@ static int h_sys_encraw(uint8_t, CmdType t, const char*, char *r, size_t s) {
     return 0;
 }
 
+// ==================== MT6835 (encoder mode 261) ====================
+// Acesso direto ao register map do chip (datasheet cap. 10) + comandos.
+// Escritas em registro são VOLÁTEIS (register map recarrega da EEPROM no
+// power-on) — pra persistir, sys.mteeprom! depois (e aguardar 6 s ligado).
+//
+// sys.mtread=<addr>          → lê registro (ex.: sys.mtread=0x011 → BW)
+// sys.mtwrite=<addr> <val>   → escreve registro (aceita "addr val" ou "addr:val")
+//                              ex. úteis: 0x00E AUTOCAL_FREQ[6:4], 0x011 BW[2:0]
+// sys.mtzero!                → ZERO_POS ← posição atual (recusa motor armado)
+// sys.mteeprom!              → persiste register map na EEPROM (recusa armado;
+//                              pausa leituras de ângulo 6.5 s — datasheet 7.6.6)
+// sys.mtstatus?              → boot check + STATUS warnings + estado da auto-cal
+
+static int h_sys_mtread(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t != CMD_TYPE_SET) return -1;   // "SET" carrega o endereço como valor
+    long addr = parse_long(v, -1);
+    int val = odrive_bridge_mt6835_read_reg((int)addr);
+    if (val < 0) { strncpy(r, "FAIL", s); return -1; }
+    snprintf(r, s, "reg[0x%03lX]=0x%02X", (unsigned long)addr, (unsigned)val);
+    return 0;
+}
+
+static int h_sys_mtwrite(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t != CMD_TYPE_SET || !v) return -1;
+    char *end = nullptr;
+    long addr = strtol(v, &end, 0);
+    if (end == v) return -1;
+    while (*end == ' ' || *end == ':' || *end == ',') end++;
+    const char *v2 = end;
+    long val = strtol(v2, &end, 0);
+    if (end == v2) return -1;
+    if (!odrive_bridge_mt6835_write_reg((int)addr, (int)val)) {
+        strncpy(r, "FAIL", s);
+        return -1;
+    }
+    // Read-back como confirmação (a escrita é assíncrona do ponto de vista do
+    // host — devolver o valor relido evita "escreveu no vazio" silencioso).
+    int rb = odrive_bridge_mt6835_read_reg((int)addr);
+    snprintf(r, s, "reg[0x%03lX]=0x%02X", (unsigned long)addr, (unsigned)(rb < 0 ? 0xFF : rb));
+    return 0;
+}
+
+static int h_sys_mtzero(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_EXEC && t != CMD_TYPE_GET) return -1;
+    int ok = odrive_bridge_mt6835_set_zero();
+    strncpy(r, ok ? "OK (volatil - sys.mteeprom! para persistir)"
+                  : "FAIL (motor armado? mode!=261? ack!=0x55?)", s);
+    return ok ? 0 : -1;
+}
+
+static int h_sys_mteeprom(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_EXEC && t != CMD_TYPE_GET) return -1;
+    int ok = odrive_bridge_mt6835_program_eeprom();
+    strncpy(r, ok ? "OK - NAO desligar por 6s (leituras pausadas 6.5s)"
+                  : "FAIL (motor armado? ack!=0x55?)", s);
+    return ok ? 0 : -1;
+}
+
+static int h_sys_mtstatus(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_EXEC && t != CMD_TYPE_GET) return -1;
+    struct mt6835_snap_t snap;
+    odrive_bridge_mt6835_get_status(&snap);
+    if (!snap.is_mt6835) { strncpy(r, "N/A (encoder mode != 261)", s); return 0; }
+    static const char *cal_names[] = {"none", "running", "failed", "ok"};
+    snprintf(r, s, "boot=%d hyst0=%d overspeed=%d weakfield=%d undervolt=%d cal=%s",
+             snap.boot_ok, snap.hyst_zeroed, snap.overspeed, snap.weak_field,
+             snap.undervolt,
+             (snap.cal_state >= 0 && snap.cal_state <= 3) ? cal_names[snap.cal_state] : "read_fail");
+    return 0;
+}
+
 // fxtest — diagnóstico FFB sumarizado em uma linha
 extern int   ffb_is_active(void);
 extern float ffb_get_pending_torque_nm(void);
@@ -893,6 +975,7 @@ const CmdEntry cmdtable[] = {
     { "axis",  "maxtorque",     h_axis_maxtorque },
     { "axis",  "fxratio",       h_axis_fxratio },
     { "axis",  "invert",        h_axis_invert },
+    { "axis",  "ffbinvert",     h_axis_ffbinvert },
     { "axis",  "drvtype",       h_axis_drvtype },
     { "axis",  "enctype",       h_axis_enctype },
     { "axis",  "pos",           h_axis_pos },
@@ -955,6 +1038,12 @@ const CmdEntry cmdtable[] = {
     { "sys",   "ping",         h_sys_ping },
     { "sys",   "encraw",       h_sys_encraw },        // Encoder SPI debug counters
     { "sys",   "magnet",       h_sys_magnet },        // AS5047 DIAAGC (magnet status)
+    // MT6835 (mode 261) — register map + comandos do chip
+    { "sys",   "mtread",       h_sys_mtread },        // sys.mtread=<addr>
+    { "sys",   "mtwrite",      h_sys_mtwrite },       // sys.mtwrite=<addr> <val>
+    { "sys",   "mtzero",       h_sys_mtzero },        // ZERO_POS ← posição atual
+    { "sys",   "mteeprom",     h_sys_mteeprom },      // persiste register map (6s!)
+    { "sys",   "mtstatus",     h_sys_mtstatus },      // boot/warnings/auto-cal
     { "sys",   "fxtest",       h_sys_fxtest },
 
     // odrv.* (read-only; Configurator não escreve hardware aqui)

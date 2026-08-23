@@ -61,6 +61,24 @@ struct magnet_snap_t {
 };
 void odrive_bridge_enc_get_magnet(struct magnet_snap_t *snap);
 
+// ==== MT6835 (mode 261) — acesso a registro + comandos do chip ====
+// Todos retornam falha (-1 / 0) se o encoder não está em MODE_SPI_ABS_MT6835.
+int  odrive_bridge_mt6835_read_reg(int addr);            // >= 0: valor, -1: falha
+int  odrive_bridge_mt6835_write_reg(int addr, int val);  // 1 OK, 0 falha
+int  odrive_bridge_mt6835_set_zero(void);                // 1 OK (ack 0x55), 0 falha/armado
+int  odrive_bridge_mt6835_program_eeprom(void);          // 1 OK — aguardar 6 s antes de power-off!
+
+struct mt6835_snap_t {
+    int is_mt6835;     // 1 = encoder mode é MT6835 (261)
+    int boot_ok;       // 1 = comm verificada por CRC no setup()
+    int hyst_zeroed;   // 1 = HYST=0 aplicado com sucesso no boot
+    int overspeed;     // STATUS[0] da última leitura de ângulo válida
+    int weak_field;    // STATUS[1] — 1 = campo magnético fraco (magneto longe!)
+    int undervolt;     // STATUS[2]
+    int cal_state;     // reg 0x113[7:6]: 0 none, 1 running, 2 failed, 3 ok; -1 = leitura falhou
+};
+void odrive_bridge_mt6835_get_status(struct mt6835_snap_t *snap);
+
 #ifdef __cplusplus
 }
 #endif

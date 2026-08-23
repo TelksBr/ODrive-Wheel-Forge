@@ -3,7 +3,10 @@
 
 #include <string>
 #include <ostream>
+#include <type_traits>
 #include <fibre/bufptr.hpp>
+
+struct NullStream;
 
 namespace fibre {
 
@@ -116,7 +119,12 @@ public:
     size_t length_;
 };
 
-template<typename TStream, typename T>
+template<typename T>
+inline NullStream& operator<<(NullStream& stream, const HexArrayPrinter<T>&) {
+    return stream;
+}
+
+template<typename TStream, typename T, typename = typename std::enable_if<!std::is_same<typename std::decay<TStream>::type, NullStream>::value>::type>
 TStream& operator<<(TStream& stream, const HexArrayPrinter<T>& printer) {
     for (size_t pos = 0; pos < printer.length_; ++pos) {
         stream << " " << as_hex(printer.ptr_[pos]);

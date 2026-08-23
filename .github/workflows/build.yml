@@ -3,6 +3,7 @@ name: Build Firmware
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -10,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     # 1. Checkout the repository and its submodules with full history for versioning
@@ -23,7 +26,7 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-arm-none-eabi build-essential python3 python3-yaml python3-jinja2 python3-jsonschema
+        sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-yaml python3-jinja2 python3-jsonschema
 
     # 3. Generate ODrive autogen files
     - name: Generate ODrive autogen files
@@ -69,3 +72,15 @@ jobs:
         name: odrive-wheel-firmware
         path: ./Odrive-Wheel/build/odrive-wheel.bin
         retention-days: 14
+
+    # 7. Create GitHub Release if pushed with a version tag
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          ./Odrive-Wheel/build/odrive-wheel.bin
+          ./Odrive-Wheel/build/odrive-wheel.hex
+          ./Odrive-Wheel/build/odrive-wheel.elf
+        prerelease: true
+        generate_release_notes: true

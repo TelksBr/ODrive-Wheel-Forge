@@ -140,7 +140,7 @@ $msysToolchain = Convert-ToMsysPath $ToolchainBin
 $msysFirmware = Convert-ToMsysPath $firmwareDir
 
 $cmdLines = @(
-  ('export PATH="{0}":$PATH' -f $msysToolchain),
+  ('export PATH="{0}:/mingw64/bin:/usr/bin:$PATH"' -f $msysToolchain),
   ('cd "{0}"' -f $msysFirmware)
 )
 

@@ -201,87 +201,53 @@ int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect) {
 
 	case FFB_EFFECT_RAMP:
 	{
-		float elapsed_time = (micros()/1000.0) - (float)effect->startTime;
+		// Bug 7: Previne divisão por zero se duration <= 0 e limita interpolação entre startLevel e endLevel
+		float elapsed_time = (micros() / 1000.0f) - (float)effect->startTime;
 		int32_t duration = effect->duration;
-		force_vector = (int32_t)effect->startLevel + (elapsed_time * (effect->endLevel - effect->startLevel)) / duration;
+		if (duration <= 0) {
+			force_vector = effect->endLevel;
+		} else if (elapsed_time >= (float)duration) {
+			force_vector = effect->endLevel;
+		} else if (elapsed_time <= 0.0f) {
+			force_vector = effect->startLevel;
+		} else {
+			force_vector = (int32_t)effect->startLevel +
+			               (int32_t)((elapsed_time * (float)(effect->endLevel - effect->startLevel)) / (float)duration);
+		}
 		break;
 	}
 
 	case FFB_EFFECT_SQUARE:
-	{
-		uint32_t elapsed_time = HAL_GetTick() - effect->startTime; // Square is ms aligned
-		int32_t force = ((elapsed_time + effect->phase) % ((uint32_t)effect->period + 2)) < (uint32_t)(effect->period + 2) / 2 ? -magnitude : magnitude;
-		force_vector = force + effect->offset;
-		break;
-	}
-
 	case FFB_EFFECT_TRIANGLE:
-	{
-		int32_t force = 0;
-		int32_t offset = effect->offset;
-		float elapsed_time = micros() - ((float)effect->startTime*1000.0);
-		uint32_t phase = effect->phase;
-		uint32_t period = effect->period;
-		float periodF = period;
-
-		int32_t maxMagnitude = offset + magnitude;
-		int32_t minMagnitude = offset - magnitude;
-		float phasetime = (phase * period) / 35999.0;
-		uint32_t timeTemp = elapsed_time + (phasetime*1000); // timetemp in µs
-		float remainder = (timeTemp % (period*1000)) / 1000;
-		float slope = ((maxMagnitude - minMagnitude) * 2) / periodF;
-		if (remainder > (periodF / 2))
-			force = slope * (periodF - remainder);
-		else
-			force = slope * remainder;
-		force += minMagnitude;
-		force_vector = force;
-		break;
-	}
-
 	case FFB_EFFECT_SAWTOOTHUP:
-	{
-		float offset = effect->offset;
-		float elapsed_time = micros() - ((float)effect->startTime*1000.0);
-		uint32_t phase = effect->phase;
-		uint32_t period = effect->period;
-		float periodF = effect->period;
-
-		float maxMagnitude = offset + magnitude;
-		float minMagnitude = offset - magnitude;
-		float phasetime = (phase * period) / 35999.0;
-		uint32_t timeTemp = elapsed_time + (phasetime*1000); // timetemp in µs
-		float remainder = (timeTemp % (period*1000)) / 1000;
-		float slope = (maxMagnitude - minMagnitude) / periodF;
-		force_vector = (int32_t)(minMagnitude + slope * (period - remainder));
-		break;
-	}
-
 	case FFB_EFFECT_SAWTOOTHDOWN:
-	{
-		float offset = effect->offset;
-		float elapsed_time = micros() - ((float)effect->startTime*1000.0);
-		float phase = effect->phase;
-		uint32_t period = effect->period;
-		float periodF = effect->period;
-
-		float maxMagnitude = offset + magnitude;
-		float minMagnitude = offset - magnitude;
-		float phasetime = (phase * period) / 35999.0;
-		uint32_t timeTemp = elapsed_time + (phasetime*1000); // timetemp in µs
-		float remainder = (timeTemp % (period*1000)) / 1000;
-		float slope = (maxMagnitude - minMagnitude) / periodF;
-		force_vector = (int32_t)(minMagnitude + slope * (remainder)); // reverse time
-		break;
-	}
-
 	case FFB_EFFECT_SINE:
 	{
-		float t = (micros()/1000.0) - (float)effect->startTime;
-		float freq = 1.0f / (float)(std::max<uint16_t>(effect->period, 2));
-		float phase = (float)effect->phase / (float)35999; //degrees
-		float sine = sinf(2.0 * M_PI * (t * freq + phase)) * magnitude;
-		force_vector = (int32_t)(effect->offset + sine);
+		// Bug 8: Normalização de tempo por aritmética modular de inteiros para precisão absoluta (24-bit IEEE 754)
+		// sem degradação ou jitter após horas de uso contínuo, e com proteção total contra divisão por zero (period == 0).
+		uint32_t period_ms = std::max<uint32_t>((uint32_t)effect->period, 1);
+		uint32_t period_us = period_ms * 1000;
+		uint32_t elapsed_us = micros() - ((uint32_t)effect->startTime * 1000);
+		uint32_t phase_us = ((uint32_t)effect->phase * period_us) / 36000;
+		uint32_t cycle_pos_us = (elapsed_us + phase_us) % period_us;
+		float phase_norm = (float)cycle_pos_us / (float)period_us; // Exatamente no intervalo [0.0, 1.0)
+
+		if (effect->type == FFB_EFFECT_SQUARE) {
+			int32_t sqr = (phase_norm < 0.5f) ? -magnitude : magnitude;
+			force_vector = effect->offset + sqr;
+		} else if (effect->type == FFB_EFFECT_TRIANGLE) {
+			float tri = (phase_norm < 0.5f) ? (4.0f * phase_norm - 1.0f) : (3.0f - 4.0f * phase_norm);
+			force_vector = (int32_t)(effect->offset + tri * (float)magnitude);
+		} else if (effect->type == FFB_EFFECT_SAWTOOTHUP) {
+			float saw = 2.0f * phase_norm - 1.0f;
+			force_vector = (int32_t)(effect->offset + saw * (float)magnitude);
+		} else if (effect->type == FFB_EFFECT_SAWTOOTHDOWN) {
+			float saw = 1.0f - 2.0f * phase_norm;
+			force_vector = (int32_t)(effect->offset + saw * (float)magnitude);
+		} else if (effect->type == FFB_EFFECT_SINE) {
+			float sine = sinf(2.0f * (float)M_PI * phase_norm) * (float)magnitude;
+			force_vector = (int32_t)(effect->offset + sine);
+		}
 		break;
 	}
 	default:
@@ -387,7 +353,12 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 				force = clip<int32_t, int32_t>(force, -effect->conditions[con_idx].negativeSaturation, effect->conditions[con_idx].positiveSaturation);
 			}
 
-			result_torque -= effect->filter[axis]->process( (((gain.friction + 1) * force) >> 8) * angle_ratio * scaler.friction);
+			int32_t force_raw = (((gain.friction + 1) * force) >> 8) * angle_ratio * scaler.friction;
+			if (effect->filter[axis] != nullptr) {
+				result_torque -= effect->filter[axis]->process(force_raw);
+			} else {
+				result_torque -= force_raw;
+			}
 		}
 
 		break;
@@ -396,7 +367,12 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 	{
 
 		float speed = metrics->speed * INTERNAL_SCALER_DAMPER;
-		result_torque -= effect->filter[axis]->process(calcConditionEffectForce(effect, speed, gain.damper, con_idx, scaler.damper, angle_ratio));
+		int32_t force_raw = calcConditionEffectForce(effect, speed, gain.damper, con_idx, scaler.damper, angle_ratio);
+		if (effect->filter[axis] != nullptr) {
+			result_torque -= effect->filter[axis]->process(force_raw);
+		} else {
+			result_torque -= force_raw;
+		}
 
 		break;
 	}
@@ -404,7 +380,12 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 	case FFB_EFFECT_INERTIA:
 	{
 		float accel = metrics->accel * INTERNAL_SCALER_INERTIA;
-		result_torque -= effect->filter[axis]->process(calcConditionEffectForce(effect, accel, gain.inertia, con_idx, scaler.inertia, angle_ratio)); // Bump *60 the inertia feedback
+		int32_t force_raw = calcConditionEffectForce(effect, accel, gain.inertia, con_idx, scaler.inertia, angle_ratio); // Bump *60 the inertia feedback
+		if (effect->filter[axis] != nullptr) {
+			result_torque -= effect->filter[axis]->process(force_raw);
+		} else {
+			result_torque -= force_raw;
+		}
 
 		break;
 	}
@@ -445,9 +426,13 @@ int32_t EffectsCalculator::calcConditionEffectForce(FFB_Effect *effect, float  m
 		// remove offset/deadband from metric to compute force
 		metric = metric - (offset + (deadBand * (metric < offset ? -1 : 1)) );
 
+		int32_t posSat = effect->conditions[idx].positiveSaturation;
+		int32_t negSat = effect->conditions[idx].negativeSaturation;
+		if (posSat == 0 && effect->conditions[idx].positiveCoefficient != 0) posSat = 0x7FFF;
+		if (negSat == 0 && effect->conditions[idx].negativeCoefficient != 0) negSat = 0x7FFF;
+
 		force = clip<int32_t, int32_t>((coefficient * gainfactor * scale * (float)(metric)),
-										-effect->conditions[idx].negativeSaturation,
-										 effect->conditions[idx].positiveSaturation);
+										-negSat, posSat);
 	}
 
 

@@ -79,22 +79,17 @@ public:
     int16_t expo_      = 0;
     uint8_t exposcale_ = 100;          // divisor pro expo (default 100 = 1.0)
 
-    // Phase 4.x — Inverte direção lógica do volante sem precisar trocar fios
-    // do motor nem mexer em motor.config.direction da ODrive. Quando true:
-    //   - getScaledAxisPos() retorna -pos: HID reporta direção contrária à
-    //     do encoder, então jogo "vê" o volante girando no sentido natural
-    //     pro usuário.
-    //   - setEffectTorque(t) negativa o torque vindo do jogo (em HID space)
-    //     antes de somar axis effects: motor empurra no sentido oposto ao
-    //     do encoder, o que casa com o sinal invertido visto pelo jogo.
-    // Axis effects (idleSpring/damper/friction/etc.) usam metrics nativas
-    // do encoder e não são invertidos — eles se mantêm consistentes
-    // automaticamente porque computam torque na mesma referência do motor.
-    bool inverted_ = false;
+    // axisInverted_ : inverse uniquement la position reportée au jeu (HID IN).
+    //   getScaledAxisPos() retourne -pos quand true.  Commande: axis.invert
+    // ffbInverted_  : inverse uniquement le couple FFB reçu du jeu (HID OUT).
+    //   setEffectTorque() negativa le torque quand true. Commande: axis.ffbinvert
+    // Les deux sont indépendants et persistants (EEPROM bit0/bit1).
+    bool axisInverted_ = false;
+    bool ffbInverted_  = false;
 
     void setEffectTorque(int32_t torque) override {
-        // Phase 4.x — inverte torque vindo do jogo se inverted_ ativo.
-        if (inverted_) torque = -torque;
+        // Inverse le couple FFB indépendamment de l'axe (axis.ffbinvert)
+        if (ffbInverted_) torque = -torque;
 
         // EffectsCalculator entrega torque clipado em [-0x7FFF, +0x7FFF].
         // Soma os axis effects calculados em calculateAxisEffects (sempre ativos).
@@ -236,14 +231,26 @@ public:
         }
 
         const float dt = 0.001f;
-        float new_speed = (degrees - metrics_.posDegrees) / dt;
-        float new_accel = (new_speed - metrics_.speed) / dt;
+        // Velocidade vem da PLL do encoder (vel_estimate, turns/s → deg/s) em
+        // vez de derivada bruta de shadow_count_. Motivo: a derivada dupla do
+        // count bruto amplificava o ruído do encoder (LSBs do MT6835) em ~10⁶
+        // no accel, obrigando current_control_bandwidth ficar baixo (~100)
+        // só pra mascarar o chiado no motor. Com a PLL como fonte,
+        // encoder.config.bandwidth vira o knob real de ruído/latência dos
+        // efeitos de velocidade (damper/friction/inertia — axis e jogo).
+        float new_speed = odrive_bridge_get_vel_estimate() * 360.0f;
+        // Accel: UMA derivada da velocidade já filtrada pela PLL, mais um
+        // low-pass de 1ª ordem (~100 Hz @ 1 kHz) pra suavizar os degraus
+        // residuais da PLL antes de multiplicar pelos gains de inertia.
+        const float ACCEL_LPF_ALPHA = 0.386f;  // dt/(dt + 1/(2π·100Hz))
+        float raw_accel = (new_speed - metrics_.speed) / dt;
+        accelLpf_ += ACCEL_LPF_ALPHA * (raw_accel - accelLpf_);
 
         metrics_.posDegrees = degrees;
         metrics_.pos_f = pos_f;
         metrics_.pos_scaled_16b = (int32_t)(pos_f * 32767.0f);
         metrics_.speed = new_speed;
-        metrics_.accel = new_accel;
+        metrics_.accel = accelLpf_;
 
         // Aplica pending_torque_ no motor SEMPRE (não condicionado ao FFB do
         // jogo estar ativo). Razão: EffectsCalculator::calculateEffects() chama
@@ -270,7 +277,7 @@ public:
     }
 
     int32_t getScaledAxisPos() const {
-        return inverted_ ? -metrics_.pos_scaled_16b : metrics_.pos_scaled_16b;
+        return axisInverted_ ? -metrics_.pos_scaled_16b : metrics_.pos_scaled_16b;
     }
 
     // zeroOffset_ é public pra ffb_load/save_flash conseguir persistir.
@@ -281,6 +288,7 @@ public:
 
 private:
     metric_t metrics_{};
+    float accelLpf_           = 0.0f;    // estado do low-pass do accel (deg/s²)
     float pending_torque_     = 0.0f;
     int32_t axisEffectTorque_ = 0;       // calculado em calculateAxisEffects
     int32_t lastTorque_       = 0;       // pra slew rate limit
@@ -574,7 +582,8 @@ static void ffb_load_axis_params_internal(void) {
     }
     // Phase 4.x — bitfield de flags do axis (ADR_AXIS1_CONFIG)
     if (Flash_Read(ADR_AXIS1_CONFIG, &v, false) && v != 0xFFFF) {
-        s_axis_raw->inverted_ = (v & 0x0001) != 0;
+        s_axis_raw->axisInverted_ = (v & 0x0001) != 0;
+        s_axis_raw->ffbInverted_  = (v & 0x0002) != 0;
     }
     // zeroOffset_ — split em 2 slots uint16 reconstruindo um float32.
     // Inicial 0.0f no construtor é o default seguro (sem offset).
@@ -925,7 +934,8 @@ extern "C" int ffb_save_flash(void) {
         // Phase 4.x — bitfield de flags do axis. Atualmente só bit 0 = inverted_.
         // Outros bits ficam reservados pra futuras flags (ex: deadzone enable,
         // smoothing, etc.) sem precisar de novos endereços na EE.
-        uint16_t cfgFlags = (s_axis_raw->inverted_ ? 0x0001 : 0x0000);
+        uint16_t cfgFlags = (s_axis_raw->axisInverted_ ? 0x0001 : 0x0000)
+                         | (s_axis_raw->ffbInverted_  ? 0x0002 : 0x0000);
         if (!Flash_Write(ADR_AXIS1_CONFIG, cfgFlags)) s_last_save_errors++;
         s_last_save_writes++;
 
@@ -1069,8 +1079,10 @@ extern "C" void ffb_eeformat(char *buf, int bufsize) {
 // Axis params (axis.range / axis.maxtorque / axis.fxratio) — persistem via
 // EEPROM emulada quando integrarmos esses no saveFlash futuramente. Por
 // enquanto sao runtime-only (resetam nos defaults no boot).
-extern "C" int  ffb_get_axis_invert(void) { return (s_axis_raw && s_axis_raw->inverted_) ? 1 : 0; }
-extern "C" void ffb_set_axis_invert(int v) { if (s_axis_raw) s_axis_raw->inverted_ = (v != 0); }
+extern "C" int  ffb_get_axis_invert(void) { return (s_axis_raw && s_axis_raw->axisInverted_) ? 1 : 0; }
+extern "C" void ffb_set_axis_invert(int v) { if (s_axis_raw) s_axis_raw->axisInverted_ = (v != 0); }
+extern "C" int  ffb_get_ffb_invert(void)  { return (s_axis_raw && s_axis_raw->ffbInverted_)  ? 1 : 0; }
+extern "C" void ffb_set_ffb_invert(int v) { if (s_axis_raw) s_axis_raw->ffbInverted_  = (v != 0); }
 
 // Phase 4.x — divisor VBUS. Setter clamp em 1-50 e recalcula scale cache
 // que é lido pelo IRQ de leitura de ADC (vbus_sense_adc_cb em low_level.cpp).
@@ -1139,7 +1151,13 @@ extern "C" void     ffb_set_z_glitches(uint32_t v) { g_z_glitch_count = v; }
 
 // Live readouts — mapeados pra metric_t do axis
 extern "C" int   ffb_get_axis_curtorque(void)   { return s_axis_raw ? (int)s_axis_raw->getMetrics()->torque : 0; }
-extern "C" float ffb_get_axis_curpos(void)      { return s_axis_raw ? s_axis_raw->getMetrics()->posDegrees : 0.0f; }
+extern "C" float ffb_get_axis_curpos(void)      {
+    // Applique axis.invert comme getScaledAxisPos() (HID) : curpos doit refléter
+    // la position vue par le jeu, sinon le visuel de l'app ne suit pas l'inversion.
+    if (!s_axis_raw) return 0.0f;
+    float deg = s_axis_raw->getMetrics()->posDegrees;
+    return s_axis_raw->axisInverted_ ? -deg : deg;
+}
 extern "C" float ffb_get_axis_curspd(void)      { return s_axis_raw ? s_axis_raw->getMetrics()->speed : 0.0f; }
 extern "C" float ffb_get_axis_curaccel(void)    { return s_axis_raw ? s_axis_raw->getMetrics()->accel : 0.0f; }
 

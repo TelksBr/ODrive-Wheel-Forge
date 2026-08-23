@@ -10,37 +10,61 @@ def version_str_to_tuple(version_string):
     Converts a version string to a tuple of the form
     (major, minor, revision, prerelease)
 
-    Example: "fw-v0.3.6-23" => (0, 3, 6, True)
-
-    If version_string does not match the pattern above, this function throws an
-    Exception.
+    Examples:
+      "v1.0.0-rc12" -> (1, 0, 0, True)
+      "v1.0.0" -> (1, 0, 0, False)
+      "fw-v0.3.6-23" -> (0, 3, 6, True)
+      "1.0.0" -> (1, 0, 0, False)
     """
-    regex=r'.*v([0-9]+)\.([0-9]+)\.([0-9]+)(.*)'
-    if not re.match(regex, version_string):
-        raise Exception()
-    return (int(re.sub(regex, r"\1", version_string)),
-            int(re.sub(regex, r"\2", version_string)),
-            int(re.sub(regex, r"\3", version_string)),
-            (re.sub(regex, r"\4", version_string) != ""))
+    regex = r'.*?(?:v|fw-v)?([0-9]+)\.([0-9]+)\.([0-9]+)(.*)'
+    m = re.match(regex, version_string)
+    if not m:
+        raise ValueError(f"Version string does not match SemVer: {version_string}")
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    revision = int(m.group(3))
+    suffix = m.group(4).strip()
+    is_prerelease = (suffix != "")
+    return major, minor, revision, is_prerelease
 
 
 def get_version_from_git():
+    # Allow overriding via environment variable
+    env_ver = os.environ.get("ODRIVE_FW_VERSION") or os.environ.get("FW_VERSION")
+    if env_ver:
+        try:
+            major, minor, rev, prerelease = version_str_to_tuple(env_ver)
+            return env_ver, major, minor, rev, prerelease
+        except Exception:
+            pass
+
     script_dir = os.path.dirname(os.path.realpath(__file__))
     try:
-        # Determine the current git commit version
-        git_tag = subprocess.check_output(["git", "describe", "--always", "--tags", "--match=*fw*", "--dirty=*"],
-            cwd=script_dir)
-        git_tag = git_tag.decode(sys.stdout.encoding or 'ascii').rstrip('\n')
+        # Determine the current git commit version using all tags
+        git_tag = subprocess.check_output(
+            ["git", "describe", "--always", "--tags", "--dirty=*"],
+            cwd=script_dir,
+            stderr=subprocess.DEVNULL
+        )
+        git_tag = git_tag.decode(sys.stdout.encoding or 'utf-8').rstrip('\n')
 
         (major, minor, revision, is_prerelease) = version_str_to_tuple(git_tag)
-
-        # if is_prerelease:
-        #     revision += 1
         return git_tag, major, minor, revision, is_prerelease
 
     except Exception as ex:
-        print(ex)
-        return "[unknown version]", 0, 0, 0, 1
+        # Check if version.txt exists as fallback
+        version_file_path = os.path.join(script_dir, 'version.txt')
+        if os.path.exists(version_file_path):
+            try:
+                with open(version_file_path, 'r', encoding='utf-8') as f:
+                    ver = f.readline().strip()
+                major, minor, rev, prerelease = version_str_to_tuple(ver)
+                return ver, major, minor, rev, prerelease
+            except Exception:
+                pass
+
+        # Default fallback for ODrive-Wheel fork
+        return "[unknown version]", 1, 0, 0, 1
 
 def get_version_str(git_only=False, is_post_release=False, bump_rev=False, release_override=False):
     """

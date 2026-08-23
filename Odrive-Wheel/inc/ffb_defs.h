@@ -305,7 +305,7 @@ typedef struct
 	uint16_t deadBand = 0;
 
 	bool isActive(){ // Condition is active if either coefficient is not zero
-		return (positiveCoefficient != 0 && positiveSaturation != 0) || (negativeCoefficient != 0 && negativeSaturation != 0);
+		return (positiveCoefficient != 0) || (negativeCoefficient != 0);
 	}
 } FFB_Effect_Condition;
 
