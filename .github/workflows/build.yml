@@ -82,5 +82,5 @@ jobs:
           ./Odrive-Wheel/build/odrive-wheel.bin
           ./Odrive-Wheel/build/odrive-wheel.hex
           ./Odrive-Wheel/build/odrive-wheel.elf
-        prerelease: true
+        prerelease: false
         generate_release_notes: true
