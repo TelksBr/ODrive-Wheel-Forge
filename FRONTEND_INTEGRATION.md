@@ -82,3 +82,56 @@ Se o usuário estiver utilizando o encoder MT6835 (`encoder.config.mode = 261`):
   - `ok`: Quantidade de leituras válidas.
   - `pty`: Erros de paridade / CRC8 (deve ser 0 ou próximo de 0).
   - `xfr`: Erros de barramento SPI ocupado / timeout.
+
+---
+
+## 6. Telemetria Térmica em Tempo Real (MOSFETs e Motor)
+
+O firmware agora lê os conversores analógicos dos termistores NTC em tempo real:
+
+| Comando | Tipo | Retorno / Exemplo | Descrição |
+|---|---|---|---|
+| `sys.temp?` | GET | `38.4` | Temperatura real dos MOSFETs da ponte H em °C (Onboard NTC). |
+| `sys.motortemp?` | GET | `45.2` | Temperatura real do motor em °C (Offboard NTC via GPIO). |
+| `r axis0.motor.fet_thermistor.temperature` | GET | `38.400000` | Endpoint nativo ODrive da temperatura dos FETs. |
+| `r axis0.motor.motor_thermistor.temperature` | GET | `45.200000` | Endpoint nativo ODrive da temperatura do motor. |
+
+---
+
+## 7. Configuração de Entradas GPIO e Termistor no PWA
+
+### 7.1 Modos das Entradas GPIO (`gpio.<inst>.mode`)
+- `gpio.1.mode` até `gpio.4.mode` (Pinos Analógicos ADC):
+  - `0`: Desabilitado (ou reservado para Termistor do Motor).
+  - `1`: Botão do Joystick HID (`gpio.N.idx = 0..63`).
+  - `2`: Eixo Analógico HID (`gpio.N.idx = 0` para RX, `1` para RY, `2` para RZ, `3` para Slider).
+  - `3`: Botão Centralizar Volante (Zero Wheel - borda de descida zera centro).
+- `gpio.6.mode` (Pino Digital PB2):
+  - Aceita apenas `0` (Off), `1` (Botão) ou `3` (Zero Wheel).
+
+### 7.2 Fluxo de Configuração de Termistor de Motor no PWA
+Quando o usuário seleciona **"Termistor do Motor"** para um pino GPIO `N` (ex: GPIO 4):
+
+```typescript
+// 1. Libera o pino no subsistema de botões/eixos HID
+await serial.write("w gpio.4.mode 0\n");
+
+// 2. Aponta o pino no termistor do motor e ativa
+await serial.write("w axis0.motor.motor_thermistor.config.gpio_pin 4\n");
+await serial.write("w axis0.motor.motor_thermistor.config.enabled true\n");
+
+// 3. Aplica coeficientes NTC 10k padrão e limites de proteção
+await serial.write("w axis0.motor.motor_thermistor.config.poly_coefficient_0 363.939\n");
+await serial.write("w axis0.motor.motor_thermistor.config.poly_coefficient_1 -462.154\n");
+await serial.write("w axis0.motor.motor_thermistor.config.poly_coefficient_2 307.551\n");
+await serial.write("w axis0.motor.motor_thermistor.config.poly_coefficient_3 -27.726\n");
+await serial.write("w axis0.motor.motor_thermistor.config.temp_limit_lower 80.0\n");
+await serial.write("w axis0.motor.motor_thermistor.config.temp_limit_upper 100.0\n");
+```
+
+Se o usuário mudar o pino para outro modo (ex: Eixo Analógico):
+```typescript
+// Desativa o termistor para não conflitar com o ADC
+await serial.write("w axis0.motor.motor_thermistor.config.enabled false\n");
+await serial.write("w gpio.4.mode 2\n");
+```
