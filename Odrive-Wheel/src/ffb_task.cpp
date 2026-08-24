@@ -183,18 +183,32 @@ public:
             const float speed           = metrics_.speed;
 
             float spring = 0.0f;
+            float damper = 0.0f;
             bool inOvershoot = false;
 
             if (pos > halfRange) {
-                spring = -(pos - halfRange) * (float)endstopStrength_ * SPRING_GAIN;
+                float overshoot = pos - halfRange;
+                spring = -overshoot * (float)endstopStrength_ * SPRING_GAIN;
+                // Amortecimento Unidirecional (One-Way Damping):
+                // Só aplica damper na penetração do batente (speed > 0).
+                // Ao esterçar de volta para o centro (speed <= 0), o damper é 0,
+                // fazendo o volante descolar do batente imediatamente sem "grudar".
+                if (speed > 0.0f) {
+                    damper = -speed * (float)endstopDamper_ * DAMP_RATIO;
+                }
                 inOvershoot = true;
             } else if (pos < -halfRange) {
-                spring = (-pos - halfRange) * (float)endstopStrength_ * SPRING_GAIN;
+                float overshoot = -pos - halfRange;
+                spring = overshoot * (float)endstopStrength_ * SPRING_GAIN;
+                // Batente esquerdo: penetração ocorre com speed < 0.
+                // Ao retornar para o centro (speed >= 0), damper é 0.
+                if (speed < 0.0f) {
+                    damper = -speed * (float)endstopDamper_ * DAMP_RATIO;
+                }
                 inOvershoot = true;
             }
 
             if (inOvershoot) {
-                float damper = -speed * (float)endstopDamper_ * DAMP_RATIO;
                 float force = spring + damper;
                 if (force >  32767.0f) force =  32767.0f;
                 if (force < -32767.0f) force = -32767.0f;
