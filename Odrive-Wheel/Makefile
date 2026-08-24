@@ -283,12 +283,19 @@ INCLUDES = \
   -I$(FIBRE_DIR)/include
 
 # --- Optimization ------------------------------------------------------------
-OPT ?= -O2
+OPT ?= -O3
 
 # --- Flags -------------------------------------------------------------------
+# Otimizações de alta performance para ARM Cortex-M4 (FPU hardware de precisão simples):
+# -O3                       : Máxima vetorização de loops e inlining de funções matemáticas críticas (FOC / FFB / Biquad).
+# -ffast-math               : Habilita otimizações matemáticas rápidas na FPU.
+# -fno-math-errno           : Elimina checagem de errno em chamadas trigonométricas (usa instruções FPU diretas).
+# -freciprocal-math         : Converte divisões em multiplicações por recíproco aceleradas por hardware.
+# -fsingle-precision-constant: Trata constantes float (ex: 0.5f) em 32-bit nativo (evita emulação lenta de double).
 COMMON_FLAGS = $(MCU) $(DEFS) $(INCLUDES) $(OPT) \
                -Wall -fdata-sections -ffunction-sections -g -gdwarf-2 \
-               -ffast-math -fno-finite-math-only
+               -ffast-math -fno-finite-math-only -fno-math-errno \
+               -freciprocal-math -fsingle-precision-constant
 
 CFLAGS   = $(COMMON_FLAGS) -std=gnu11 -MMD -MP -MF"$(@:%.o=%.d)"
 CXXFLAGS = $(COMMON_FLAGS) -std=gnu++17 -Wno-register -fno-use-cxa-atexit -MMD -MP -MF"$(@:%.o=%.d)"
