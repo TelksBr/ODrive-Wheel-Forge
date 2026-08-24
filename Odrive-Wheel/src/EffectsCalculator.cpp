@@ -51,7 +51,6 @@ EffectsCalculator::EffectsCalculator() : CommandHandler("fx", CLSID_EFFECTSCALC)
 	registerCommand("effects", EffectsCalculator_commands::effects, "USed effects since reset (Info print as str). set 0 to reset", CMDFLAG_GET | CMDFLAG_SET | CMDFLAG_INFOSTRING);
 	registerCommand("effectsDetails", EffectsCalculator_commands::effectsDetails, "List effects details. set 0 to reset", CMDFLAG_GET | CMDFLAG_SET  | CMDFLAG_STR_ONLY | CMDFLAG_GETADR);
 	registerCommand("effectsForces", EffectsCalculator_commands::effectsForces, "List actual effects forces.", CMDFLAG_GET | CMDFLAG_GETADR);
-//	registerCommand("monitorEffect", EffectsCalculator_commands::monitorEffect, "Get monitoring status. set to 1 to enable.", CMDFLAG_GET | CMDFLAG_SET);
 
 	registerCommand("damper_f", EffectsCalculator_commands::damper_f, "Damper biquad freq", CMDFLAG_GET | CMDFLAG_SET);
 	registerCommand("damper_q", EffectsCalculator_commands::damper_q, "Damper biquad q", CMDFLAG_GET | CMDFLAG_SET);
@@ -62,8 +61,6 @@ EffectsCalculator::EffectsCalculator() : CommandHandler("fx", CLSID_EFFECTSCALC)
 	registerCommand("filterProfile_id", EffectsCalculator_commands::filterProfileId, "Conditional effects filter profile: 0 default; 1 custom", CMDFLAG_GET | CMDFLAG_SET);
 
 	registerCommand("frictionPctSpeedToRampup", EffectsCalculator_commands::frictionPctSpeedToRampup, "% of max speed for gradual increase", CMDFLAG_GET | CMDFLAG_SET);
-
-	//this->Start(); // Enable if we want to periodically monitor
 }
 
 EffectsCalculator::~EffectsCalculator()
@@ -267,7 +264,6 @@ int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect) {
 int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceVector, std::vector<std::unique_ptr<Axis>> &axes, uint8_t axis)
 {
 	int32_t result_torque = 0;
-//	uint16_t direction;
 	uint8_t con_idx = effect->useSingleCondition? 0 : axis; // condition block index
 
 	metric_t *metrics = axes[axis]->getMetrics();
@@ -452,15 +448,18 @@ int32_t EffectsCalculator::getEnvelopeMagnitude(FFB_Effect *effect)
 	}
 	int32_t scaler = abs(effect->magnitude);
 	uint32_t elapsed_time = HAL_GetTick() - effect->startTime;
+	if (elapsed_time > effect->duration) {
+		elapsed_time = effect->duration;
+	}
 	if (elapsed_time < effect->attackTime && effect->attackTime != 0)
 	{
-		scaler = (scaler - effect->attackLevel) * elapsed_time;
+		scaler = (scaler - effect->attackLevel) * (int32_t)elapsed_time;
 		scaler /= (int32_t)effect->attackTime;
 		scaler += effect->attackLevel;
 	}
 	if (elapsed_time > (effect->duration - effect->fadeTime) && effect->fadeTime != 0)
 	{
-		scaler = (scaler - effect->fadeLevel) * (effect->duration - elapsed_time); // Reversed
+		scaler = (scaler - effect->fadeLevel) * (int32_t)(effect->duration - elapsed_time);
 		scaler /= (int32_t)effect->fadeTime;
 		scaler += effect->fadeLevel;
 	}
@@ -653,8 +652,6 @@ void EffectsCalculator::logEffectType(uint8_t type,bool remove){
 				effects_stats[type-1].nb--;
 
 			if(!effects_stats[type-1].nb){
-				//effects_used &= ~(1<<(type-1)); // Only manual reset
-				//effects_stats[type-1].max = 0;
 				effects_stats[type-1].current = {0};
 			}
 		}else{
@@ -669,7 +666,6 @@ void EffectsCalculator::logEffectType(uint8_t type,bool remove){
 void EffectsCalculator::logEffectState(uint8_t type,uint8_t state){
 	if(type > 0 && type < 32){
 		if(!state){
-			// effects_stats[type-1].max = 0;
 			effects_stats[type-1].current = {0};
 		}
 	}
@@ -772,7 +768,7 @@ CommandStatus EffectsCalculator::command(const ParsedCommand& cmd,std::vector<Co
 	case EffectsCalculator_commands::effects:
 		if (cmd.type == CMDtype::get)
 		{
-			replies.emplace_back(effects_used); //listEffectsUsed(cmd.val)
+			replies.emplace_back(effects_used);
 		}
 		else if (cmd.type == CMDtype::set)
 		{
@@ -951,24 +947,10 @@ CommandStatus EffectsCalculator::command(const ParsedCommand& cmd,std::vector<Co
  *
  */
 void EffectsCalculator::Run() {
-	std::vector<CommandReply> replies;
 	Delay(500);
 	while (true) {
 		Delay(3000);
-
-		if(isMonitorEffect) {
-
-			continue; // TODO uncomment when stream is ok
-			replies.push_back(CommandReply(listEffectsUsed(true)));
-			CommandInterface::broadcastCommandReplyAsync(replies,
-					this,
-					(uint32_t)EffectsCalculator_commands::effectsDetails,
-					CMDtype::get);
-
-		}
-
 	}
-
 }
 
 /**
