@@ -108,6 +108,14 @@ extern "C" float odrive_bridge_get_brake_resistor_current(void) {
     return odrv.brake_resistor_current_;
 }
 
+extern "C" float odrive_bridge_get_fet_temp(void) {
+    return axes[0].motor_.fet_thermistor_.temperature_;
+}
+
+extern "C" float odrive_bridge_get_motor_temp(void) {
+    return axes[0].motor_.motor_thermistor_.temperature_;
+}
+
 // Snapshot dos contadores de SPI do encoder + último raw recebido.
 extern "C" void odrive_bridge_enc_get_raw(struct encraw_snap_t *snap) {
     auto& e = axes[0].encoder_;

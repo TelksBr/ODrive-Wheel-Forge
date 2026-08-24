@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <cstdlib>
+#include <cmath>
 
 extern "C" {
 
@@ -72,9 +73,28 @@ static int h_sys_cmdinfo(uint8_t, CmdType t, const char*, char *r, size_t s) {
     return 0;
 }
 
+extern "C" float odrive_bridge_get_fet_temp(void);
+extern "C" float odrive_bridge_get_motor_temp(void);
+
 static int h_sys_temp(uint8_t, CmdType t, const char*, char *r, size_t s) {
     if (t != CMD_TYPE_GET) return -1;
-    strncpy(r, "25", s); // placeholder — TODO ler termistor FET
+    float temp = odrive_bridge_get_fet_temp();
+    if (std::isnan(temp)) {
+        snprintf(r, s, "0.0");
+    } else {
+        snprintf(r, s, "%.1f", temp);
+    }
+    return 0;
+}
+
+static int h_sys_motortemp(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_GET) return -1;
+    float temp = odrive_bridge_get_motor_temp();
+    if (std::isnan(temp)) {
+        snprintf(r, s, "0.0");
+    } else {
+        snprintf(r, s, "%.1f", temp);
+    }
     return 0;
 }
 
@@ -942,6 +962,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "heapfree",     h_sys_heapfree },
     { "sys",   "cmdinfo",      h_sys_cmdinfo },
     { "sys",   "temp",         h_sys_temp },
+    { "sys",   "motortemp",    h_sys_motortemp },
 
     { "main",  "hidrate",      h_main_hidrate },
     { "main",  "cfrate",       h_main_cfrate },

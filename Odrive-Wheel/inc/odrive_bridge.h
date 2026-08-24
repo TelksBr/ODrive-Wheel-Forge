@@ -37,6 +37,10 @@ float odrive_bridge_get_torque_output(void);
 // completa a tríade pro overlay HID-only computar P_brake real a 1 kHz.
 float odrive_bridge_get_brake_resistor_current(void);
 
+// Leituras térmicas em °C (Onboard FET thermistor e Offboard Motor thermistor).
+float odrive_bridge_get_fet_temp(void);
+float odrive_bridge_get_motor_temp(void);
+
 // Snapshot dos contadores de SPI ABS do encoder pra debugar AS5047.
 // Preenche o struct com: ok_count, fail_parity, fail_ef, fail_xfer, last_rx.
 struct encraw_snap_t {
