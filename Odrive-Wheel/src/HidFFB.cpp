@@ -40,6 +40,9 @@ HidFFB::HidFFB(std::shared_ptr<EffectsCalculator> ec,uint8_t axisCount) : effect
 	pool_report.maxSimultaneousEffects = effects.size();
 	pool_report.memoryManagement = 1;
 
+	// Initialize PID state report (Report ID 2) with actuators enabled & power on
+	// so DirectInput / Windows / Forza immediately recognizes the wheel ready for FFB.
+	this->reportFFBStatus.status = (HID_ACTUATOR_POWER) | (HID_ENABLE_ACTUATORS);
 
 	this->registerHidCallback();
 }

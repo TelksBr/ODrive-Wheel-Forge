@@ -14,6 +14,8 @@
 #define USB_PID   0x0D40
 #define USB_BCD   0x0D00
 
+extern uint8_t ffb_get_wheel_mode(void);
+
 // ---------- Device Descriptor ----------
 // CDC puro com IAD não é necessário (1 função só), mas manteremos CLASS_MISC/IAD
 // pra facilitar migração futura pra composite (Phase 2b).
@@ -37,8 +39,23 @@ static const tusb_desc_device_t desc_device = {
     .bNumConfigurations = 0x01
 };
 
+static tusb_desc_device_t dynamic_desc_device;
+
 uint8_t const * tud_descriptor_device_cb(void) {
-    return (uint8_t const *)&desc_device;
+    dynamic_desc_device = desc_device;
+    uint8_t mode = ffb_get_wheel_mode();
+    if (mode == 1) {
+        // Logitech G29 Driving Force Racing Wheel (PC mode)
+        dynamic_desc_device.idVendor  = 0x046D;
+        dynamic_desc_device.idProduct = 0xC24F;
+        dynamic_desc_device.bcdDevice = 0x8803;
+    } else if (mode == 2) {
+        // Fanatec ClubSport Wheel Base V2.5
+        dynamic_desc_device.idVendor  = 0x0EB7;
+        dynamic_desc_device.idProduct = 0x0001;
+        dynamic_desc_device.bcdDevice = 0x0001;
+    }
+    return (uint8_t const *)&dynamic_desc_device;
 }
 
 // ---------- Configuration Descriptor ----------
@@ -95,16 +112,7 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
 // ---------- String Descriptors ----------
 // Serial fixo "0001" igual Firmware-Merged. UID-derived gerava serial diferente
 // por placa, e Configurator pode usar o serial pra cache de "device supported".
-static const char* string_desc_arr[] = {
-    (const char[]){0x09, 0x04},        // 0: language = en-US
-    "OpenFFBoard",                     // 1: Manufacturer
-    "ODrive-Wheel",                    // 2: Product
-    "0001",                            // 3: Serial (estatico, igual Merged)
-    "ODrive-Wheel CDC",                // 4: CDC interface name
-    "ODrive-Wheel HID"                 // 5: HID interface name
-};
-
-static uint16_t desc_str_buf[32];
+static uint16_t desc_str_buf[48];
 
 uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void)langid;
@@ -115,13 +123,37 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         return desc_str_buf;
     }
 
-    if (index >= sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) {
-        return NULL;
+    uint8_t mode = ffb_get_wheel_mode();
+    const char* str = NULL;
+
+    switch (index) {
+        case 1:
+            if (mode == 1)      str = "Logitech";
+            else if (mode == 2) str = "Fanatec";
+            else                str = "OpenFFBoard";
+            break;
+        case 2:
+            if (mode == 1)      str = "G29 Driving Force Racing Wheel";
+            else if (mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
+            else                str = "ODrive-Wheel";
+            break;
+        case 3:
+            str = "0001";
+            break;
+        case 4:
+            str = "ODrive-Wheel CDC";
+            break;
+        case 5:
+            if (mode == 1)      str = "G29 Driving Force Racing Wheel";
+            else if (mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
+            else                str = "ODrive-Wheel HID";
+            break;
+        default:
+            return NULL;
     }
 
-    const char* str = string_desc_arr[index];
     size_t chars = strlen(str);
-    if (chars > 31) chars = 31;
+    if (chars > 47) chars = 47;
 
     desc_str_buf[0] = (TUSB_DESC_STRING << 8) | (2 * chars + 2);
     for (size_t i = 0; i < chars; i++) {

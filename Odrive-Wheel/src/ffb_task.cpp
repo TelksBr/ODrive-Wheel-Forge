@@ -349,6 +349,17 @@ static uint8_t  s_vbus_divider = 19;
 // Forward declaration — definição completa lá embaixo junto com outros wrappers.
 extern "C" void ffb_set_vbus_divider(int v);
 
+// Modo de compatibilidade do volante:
+// 0 = Nativo OpenFFBoard (VID 0x1209, PID 0x0D40)
+// 1 = Forza Official / Logitech G29 (VID 0x046D, PID 0xC24F)
+// 2 = Forza Official / Fanatec CSW 2.5 (VID 0x0EB7, PID 0x0001)
+static uint8_t s_wheel_mode = 0;
+extern "C" uint8_t ffb_get_wheel_mode(void) { return s_wheel_mode; }
+extern "C" void    ffb_set_wheel_mode(uint8_t mode) {
+    if (mode > 2) mode = 0;
+    s_wheel_mode = mode;
+}
+
 // -------------------- FFB task --------------------
 static void ffb_thread(void *arg) {
     (void)arg;
@@ -507,6 +518,16 @@ extern "C" void ffb_init_storage_early(void) {
         }
     }
 
+    // Modo de compatibilidade de volante (0 = Nativo, 1 = Logitech G29, 2 = Fanatec CSW 2.5)
+    {
+        uint16_t wm = 0xFFFF;
+        if (Flash_Read(ADR_WHEEL_MODE, &wm, false) && wm != 0xFFFF && wm <= 2) {
+            s_wheel_mode = (uint8_t)wm;
+        } else {
+            s_wheel_mode = 0;
+        }
+    }
+
     s_storage_initialized = true;
 }
 
@@ -638,7 +659,7 @@ extern "C" void usbhid_hidOut_bridge(uint8_t report_id, hid_report_type_t type,
                                        const uint8_t *buf, uint16_t size) {
     if (!UsbHidHandler::globalHidHandler) return;
 
-    if (report_id == 0 && size > 0 && type == HID_REPORT_TYPE_OUTPUT) {
+    if (report_id == 0 && size > 0) {
         report_id = buf[0];
     }
 
@@ -912,6 +933,10 @@ extern "C" int ffb_save_flash(void) {
 
     // Phase 4.x — divisor VBUS (hw config, não axis-specific).
     if (!Flash_Write(ADR_VBUS_DIVIDER, (uint16_t)s_vbus_divider)) s_last_save_errors++;
+    s_last_save_writes++;
+
+    // Compatibilidade de volante (0=Nativo OpenFFBoard, 1=Logitech G29, 2=Fanatec CSW 2.5)
+    if (!Flash_Write(ADR_WHEEL_MODE, (uint16_t)s_wheel_mode)) s_last_save_errors++;
     s_last_save_writes++;
 
     // GPIO axis processor (AnalogAxisProcessing port)

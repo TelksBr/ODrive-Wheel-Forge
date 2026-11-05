@@ -23,4 +23,6 @@ const uint16_t VirtAddVarTab[NB_OF_VAR] = {
     // GPIO axis processor (AnalogAxisProcessing port)
     ADR_GPIO_AXIS_FLAGS,
     ADR_GPIO_AXIS_FREQ_X10,
+    // Compatibility wheel mode
+    ADR_WHEEL_MODE,
 };

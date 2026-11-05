@@ -230,6 +230,25 @@ static int h_sys_vbusdiv(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     return 0;
 }
 
+// sys.wheelmode — modo de compatibilidade do volante:
+//   0 = Nativo OpenFFBoard (VID 0x1209, PID 0x0D40)
+//   1 = Forza Official / Logitech G29 Emulation (VID 0x046D, PID 0xC24F)
+//   2 = Forza Official / Fanatec CSW 2.5 Emulation (VID 0x0EB7, PID 0x0001)
+// Persiste via sys.save! e ativa na USB após sys.reboot!
+extern "C" uint8_t ffb_get_wheel_mode(void);
+extern "C" void    ffb_set_wheel_mode(uint8_t mode);
+
+static int h_sys_wheelmode(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) {
+        long val = parse_long(v, (long)ffb_get_wheel_mode());
+        if (val >= 0 && val <= 2) {
+            ffb_set_wheel_mode((uint8_t)val);
+        }
+    }
+    snprintf(r, s, "%u", (unsigned)ffb_get_wheel_mode());
+    return 0;
+}
+
 // sys.eeformat! — escape hatch que força format completo do EE com clear de
 // error flags entre cada operação. Usar quando bootRC != 0 e sys.save! continua
 // falhando (caso típico: flash com flags PGAERR/PGSERR latched de operação
@@ -329,11 +348,13 @@ static int h_gpio_filt(uint8_t inst, CmdType t, const char*, char *r, size_t s) 
     return 0;
 }
 
-// sys.reboot — Configurator às vezes oferece botão. Stub respondendo OK
-// (nao reboota de verdade pra evitar perda de estado durante probe).
+// sys.reboot — Reboota a MCU quando executado via sys.reboot! (CMD_TYPE_EXEC)
 static int h_sys_reboot(uint8_t, CmdType t, const char*, char *r, size_t s) {
-    (void)t;
     strncpy(r, "OK", s);
+    if (t == CMD_TYPE_EXEC) {
+        HAL_Delay(50);
+        NVIC_SystemReset();
+    }
     return 0;
 }
 
@@ -1046,6 +1067,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "eedump",       h_sys_eedump },        // EEPROM raw status
     { "sys",   "eeformat",     h_sys_eeformat },      // EEPROM force format (escape hatch)
     { "sys",   "vbusdiv",      h_sys_vbusdiv },       // VBUS voltage divider (1-50)
+    { "sys",   "wheelmode",    h_sys_wheelmode },     // Modo de compatibilidade (0=Nativo, 1=Logitech G29, 2=Fanatec CSW 2.5)
     // GPIO inputs (1-4) — sintaxe: gpio.<inst>.<field>
     { "gpio",  "mode",         h_gpio_mode },         // 0/1/2/3 = off/button/axis/zerowheel
     { "gpio",  "idx",          h_gpio_idx },          // 0-63 botão, 0-3 eixo

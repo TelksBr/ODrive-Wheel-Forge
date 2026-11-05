@@ -89,9 +89,16 @@
 #define ADR_GPIO_AXIS_FLAGS     0x0270
 #define ADR_GPIO_AXIS_FREQ_X10  0x0271
 
-// 47 entradas: 4 system + 7 ffb + 12 axis (10 + 2 ZEROOFS) + 5 odrive
+// Compatibility wheel mode:
+// 0 = Native OpenFFBoard (VID 0x1209, PID 0x0D40)
+// 1 = Forza Official / Logitech G29 (VID 0x046D, PID 0xC24F)
+// 2 = Forza Official / Fanatec CSW 2.5 (VID 0x0EB7, PID 0x0001)
+#define ADR_WHEEL_MODE          0x0280
+
+// 48 entradas: 4 system + 7 ffb + 12 axis (10 + 2 ZEROOFS) + 5 odrive
 //             + 15 gpio (5 pinos × 3 campos) + 1 vbus_divider + 2 axis_proc
-#define NB_OF_VAR 47
+//             + 1 wheel_mode
+#define NB_OF_VAR 48
 extern const uint16_t VirtAddVarTab[NB_OF_VAR];
 
 #endif
