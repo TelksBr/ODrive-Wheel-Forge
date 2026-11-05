@@ -232,8 +232,8 @@ static int h_sys_vbusdiv(uint8_t, CmdType t, const char *v, char *r, size_t s) {
 
 // sys.wheelmode — modo de compatibilidade do volante:
 //   0 = Nativo OpenFFBoard (VID 0x1209, PID 0x0D40)
-//   1 = Forza Official / Logitech G29 Emulation (VID 0x046D, PID 0xC24F)
-//   2 = Forza Official / Fanatec CSW 2.5 Emulation (VID 0x0EB7, PID 0x0001)
+//   1 = Forza Official / Fanatec CSW 2.5 Emulation (VID 0x0EB7, PID 0x0004)
+//   (Valor 2 também aceito como Fanatec para retrocompatibilidade)
 // Persiste via sys.save! e ativa na USB após sys.reboot!
 extern "C" uint8_t ffb_get_wheel_mode(void);
 extern "C" void    ffb_set_wheel_mode(uint8_t mode);
@@ -1067,7 +1067,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "eedump",       h_sys_eedump },        // EEPROM raw status
     { "sys",   "eeformat",     h_sys_eeformat },      // EEPROM force format (escape hatch)
     { "sys",   "vbusdiv",      h_sys_vbusdiv },       // VBUS voltage divider (1-50)
-    { "sys",   "wheelmode",    h_sys_wheelmode },     // Modo de compatibilidade (0=Nativo, 1=Logitech G29, 2=Fanatec CSW 2.5)
+    { "sys",   "wheelmode",    h_sys_wheelmode },     // Modo de compatibilidade (0=Nativo, 1=Fanatec CSW 2.5)
     // GPIO inputs (1-4) — sintaxe: gpio.<inst>.<field>
     { "gpio",  "mode",         h_gpio_mode },         // 0/1/2/3 = off/button/axis/zerowheel
     { "gpio",  "idx",          h_gpio_idx },          // 0-63 botão, 0-3 eixo

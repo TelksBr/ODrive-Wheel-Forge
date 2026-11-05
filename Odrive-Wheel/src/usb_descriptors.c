@@ -44,12 +44,7 @@ static tusb_desc_device_t dynamic_desc_device;
 uint8_t const * tud_descriptor_device_cb(void) {
     dynamic_desc_device = desc_device;
     uint8_t mode = ffb_get_wheel_mode();
-    if (mode == 1) {
-        // Logitech G29 Driving Force Racing Wheel (PC mode)
-        dynamic_desc_device.idVendor  = 0x046D;
-        dynamic_desc_device.idProduct = 0xC24F;
-        dynamic_desc_device.bcdDevice = 0x8803;
-    } else if (mode == 2) {
+    if (mode == 1 || mode == 2) {
         // Fanatec ClubSport Wheel Base V2.5 (VID 0x0EB7, PID 0x0004)
         dynamic_desc_device.idVendor  = 0x0EB7;
         dynamic_desc_device.idProduct = 0x0004;
@@ -128,14 +123,12 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 
     switch (index) {
         case 1:
-            if (mode == 1)      str = "Logitech";
-            else if (mode == 2) str = "Fanatec";
-            else                str = "OpenFFBoard";
+            if (mode == 1 || mode == 2) str = "Fanatec";
+            else                        str = "OpenFFBoard";
             break;
         case 2:
-            if (mode == 1)      str = "G29 Driving Force Racing Wheel";
-            else if (mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
-            else                str = "ODrive-Wheel";
+            if (mode == 1 || mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
+            else                        str = "ODrive-Wheel";
             break;
         case 3:
             str = "0001";
@@ -144,9 +137,8 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             str = "ODrive-Wheel CDC";
             break;
         case 5:
-            if (mode == 1)      str = "G29 Driving Force Racing Wheel";
-            else if (mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
-            else                str = "ODrive-Wheel HID";
+            if (mode == 1 || mode == 2) str = "FANATEC ClubSport Wheel Base V2.5";
+            else                        str = "ODrive-Wheel HID";
             break;
         default:
             return NULL;
