@@ -546,6 +546,8 @@ extern "C" void ffb_task_init(void) {
 
     s_effects_calc = std::make_shared<EffectsCalculator>();
     s_hidffb = std::make_shared<HidFFB>(s_effects_calc, /*axisCount=*/1);
+    // Explicitly set direction enable mask to 0x04 (bit 2 in 2-axis HID descriptor)
+    s_hidffb->setDirectionEnableMask(0x04);
 
     // Phase 3.5 — força CUSTOM_PROFILE_ID. saveFlash do EffectsCalculator
     // só grava friction/damper/inertia se filterProfileId == CUSTOM_PROFILE_ID.

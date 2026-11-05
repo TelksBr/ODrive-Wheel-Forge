@@ -50,9 +50,9 @@ uint8_t const * tud_descriptor_device_cb(void) {
         dynamic_desc_device.idProduct = 0xC24F;
         dynamic_desc_device.bcdDevice = 0x8803;
     } else if (mode == 2) {
-        // Fanatec ClubSport Wheel Base V2.5
+        // Fanatec ClubSport Wheel Base V2.5 (VID 0x0EB7, PID 0x0004)
         dynamic_desc_device.idVendor  = 0x0EB7;
-        dynamic_desc_device.idProduct = 0x0001;
+        dynamic_desc_device.idProduct = 0x0004;
         dynamic_desc_device.bcdDevice = 0x0001;
     }
     return (uint8_t const *)&dynamic_desc_device;

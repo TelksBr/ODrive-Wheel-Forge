@@ -30,7 +30,8 @@
 
 HidFFB::HidFFB(std::shared_ptr<EffectsCalculator> ec,uint8_t axisCount) : effects_calc(ec), effects(ec->effects),axisCount(axisCount)
 {
-	directionEnableMask = 1 << axisCount; // Direction enable bit is last bit after axis enable bits
+	// Descriptor uses 2 axes (X=bit0, Y=bit1), so direction enable is always bit 2 (0x04)
+	directionEnableMask = 0x04;
 	// Initialize reports
 	blockLoad_report.effectBlockIndex = 1;
 	blockLoad_report.ramPoolAvailable = (effects.size()-used_effects)*sizeof(FFB_Effect);
@@ -43,6 +44,9 @@ HidFFB::HidFFB(std::shared_ptr<EffectsCalculator> ec,uint8_t axisCount) : effect
 	// Initialize PID state report (Report ID 2) with actuators enabled & power on
 	// so DirectInput / Windows / Forza immediately recognizes the wheel ready for FFB.
 	this->reportFFBStatus.status = (HID_ACTUATOR_POWER) | (HID_ENABLE_ACTUATORS);
+
+	// Start FFB enabled by default so incoming effects are computed immediately
+	this->start_FFB();
 
 	this->registerHidCallback();
 }
@@ -335,24 +339,30 @@ void HidFFB::set_effect(FFB_SetEffect_t* effect){
 
 
 	if(!overridesCondition){
-		float phaseX = M_PI*2.0 * (effect->directionX/36000.0f);
+		float phaseX = M_PI*2.0f * (effect->directionX/36000.0f);
 
-		effect_p->axisMagnitudes[0] = directionEnable ? sin(phaseX) : (effect->enableAxis & X_AXIS_ENABLE ? (effect->directionX - 18000.0f) / 18000.0f : 0); // Angular vector if dirEnable used otherwise linear or 0 if axis enabled
-		effect_p->axisMagnitudes[1] = directionEnable ? -cos(phaseX) : (effect->enableAxis & Y_AXIS_ENABLE ? -(effect->directionY - 18000.0f) / 18000.0f : 0);
-
-		// Single-axis wheel fix (Bug 1): em volantes de 1 eixo (axisCount == 1),
-		// se a direção polar enviada pelo jogo for Norte (0°) ou Sul (180°),
-		// sin(phaseX) vale 0.0f. Sem um eixo Y físico para consumir -cos(phaseX),
-		// toda a força do efeito era perdida (resultando em 0 Nm).
-		// Redirecionamos a componente não-nula para o eixo 0.
 		if (axisCount == 1) {
-			if (effect_p->axisMagnitudes[0] == 0.0f) {
-				float fallback = directionEnable ? -cosf(phaseX) :
-				                 (effect->enableAxis & Y_AXIS_ENABLE ? -(effect->directionY - 18000.0f) / 18000.0f : 1.0f);
-				if (fallback == 0.0f) fallback = 1.0f;
-				effect_p->axisMagnitudes[0] = fallback;
+			// Single-axis Direct Drive wheel: all non-condition forces route to Axis 0.
+			// DirectInput/PID may send direction in polar angles (0°=N, 90°=E, 180°=S, 270°=W)
+			// or with enableAxis flags.
+			if (directionEnable || (effect->enableAxis & (X_AXIS_ENABLE | Y_AXIS_ENABLE))) {
+				float sinVal = sinf(phaseX);
+				float cosVal = -cosf(phaseX);
+				// If game sent polar angle along Y (0° or 180°), use cosVal; if along X (90° or 270°), use sinVal
+				if (fabsf(sinVal) > 0.001f) {
+					effect_p->axisMagnitudes[0] = sinVal;
+				} else if (fabsf(cosVal) > 0.001f) {
+					effect_p->axisMagnitudes[0] = cosVal;
+				} else {
+					effect_p->axisMagnitudes[0] = 1.0f;
+				}
+			} else {
+				effect_p->axisMagnitudes[0] = 1.0f; // Fallback: always allow force on single-axis wheel
 			}
+			effect_p->axisMagnitudes[1] = 0.0f;
 		} else {
+			effect_p->axisMagnitudes[0] = directionEnable ? sinf(phaseX) : (effect->enableAxis & X_AXIS_ENABLE ? (effect->directionX - 18000.0f) / 18000.0f : 0);
+			effect_p->axisMagnitudes[1] = directionEnable ? -cosf(phaseX) : (effect->enableAxis & Y_AXIS_ENABLE ? -(effect->directionY - 18000.0f) / 18000.0f : 0);
 			if (effect_p->axisMagnitudes[0] == 0.0f && effect_p->axisMagnitudes[1] == 0.0f) {
 				effect_p->axisMagnitudes[0] = 1.0f;
 			}
