@@ -550,6 +550,7 @@ void HidFFB::set_periodic(FFB_SetPeriodic_Data_t* report){
 	FFB_Effect* effect = &effects[report->effectBlockIndex-1];
 
 	effect->period = clip<uint32_t,uint32_t>(report->period,1,0x7fff); // Period is never 0
+	effect->periodScale = 1.0f / ((float)effect->period * 1000.0f);
 	effect->magnitude = report->magnitude;
 	effect->offset = report->offset;
 	effect->phase = (uint16_t)(report->phase % 36000u);

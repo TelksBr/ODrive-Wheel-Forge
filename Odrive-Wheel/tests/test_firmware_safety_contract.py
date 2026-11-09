@@ -150,6 +150,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             self.assertRegex(self.ffb_task, rf"{counter}\.load\(std::memory_order_relaxed\)")
         for metric in (
             "s_ffb_loop_last_us", "s_ffb_loop_max_us", "s_ffb_calc_max_us",
+            "s_ffb_loop_cycles_max", "s_ffb_calc_cycles_max",
             "s_ffb_lock_wait_last_us", "s_ffb_lock_wait_max_us",
             "s_ffb_lock_hold_max_us", "s_ffb_sample_last_us", "s_ffb_sample_max_us",
         ):
@@ -695,6 +696,25 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("(int32_t)effect->conditions[con_idx].positiveCoefficient", friction)
         self.assertIn("fabsf(speed - (float)offset)", friction)
 
+    def test_friction_rampup_uses_fast_sine_with_subcount_error_bound(self):
+        friction = self.effects.split("case FFB_EFFECT_FRICTION", 1)[1].split(
+            "case FFB_EFFECT_DAMPER", 1
+        )[0]
+        self.assertIn("our_arm_sin_f32(phaseRad)", friction)
+        self.assertNotRegex(friction, r"\bsin\s*\(")
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        fast_sine = (odrive_root / "MotorControl" / "arm_sin_f32.c").read_text(encoding="utf-8")
+        self.assertIn("if (x < 0.0f)", fast_sine)
+
+        # Linear interpolation of sine over a table interval h has error at
+        # most h^2/8. Friction applies half that error to its max coefficient.
+        import math
+
+        table_size = 512
+        interval = 2.0 * math.pi / table_size
+        maximum_torque_error = 32767.0 * 0.5 * interval * interval / 8.0
+        self.assertLess(maximum_torque_error, 0.32)
+
     def test_condition_deadband_comparison_keeps_fractional_metric(self):
         condition = self.effects.split("float EffectsCalculator::calcConditionEffectForce", 1)[1].split("float EffectsCalculator::getEnvelopeMagnitude", 1)[0]
         self.assertIn("fabsf(metric - (float)offset)", condition)
@@ -750,9 +770,9 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_negative_expo_uses_the_requested_power_curve(self):
         update = self.ffb_task.split("void update()", 1)[1].split("void zeroEncoder()", 1)[0]
-        self.assertIn("if (k == 1.0f)", update)
+        self.assertIn("if (curve == 2.0f)", update)
         self.assertIn("absp *= absp;", update)
-        self.assertIn("else if (k == 2.0f)", update)
+        self.assertIn("else if (curve == 3.0f)", update)
         self.assertIn("absp = (absp * absp) * absp;", update)
         self.assertIn("__builtin_powf(absp, curve)", update)
 
@@ -792,6 +812,66 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         high_valid_power = math.pow(0.5, 10.0) # expo=900, scale=100
         self.assertGreater(abs(low_valid_power - 0.5), 0.49)
         self.assertGreater(abs(high_valid_power - 0.5), 0.49)
+
+    def test_expo_power_is_cached_on_parameter_changes_not_each_sample(self):
+        update = function_body(self.ffb_task, "void update()")
+        recalculate = function_body(self.ffb_task, "void updateExpoCurve()")
+        expo_setter = self.ffb_task.split('extern "C" void ffb_set_axis_expo(int v)', 1)[1].split(
+            'extern "C" int ffb_get_axis_exposcale()', 1
+        )[0]
+        scale_setter = self.ffb_task.split(
+            'extern "C" void ffb_set_axis_exposcale(int v)', 1
+        )[1].split('extern "C" void ffb_axis_zeroenc()', 1)[0]
+        restore = function_body(self.ffb_task, "static void ffb_load_axis_params_internal(void) {")
+
+        self.assertRegex(self.ffb_task, r"float\s+expoCurve_\s*=\s*1\.0f")
+        self.assertIn("expoCurve_ = (float)expo_ / (float)exposcale_ + 1.0f", recalculate)
+        self.assertIn("const float curve = expoCurve_", update)
+        self.assertNotIn("(float)expo_ / (float)exposcale_", update)
+        self.assertIn("s_axis_raw->updateExpoCurve()", expo_setter)
+        self.assertIn("s_axis_raw->updateExpoCurve()", scale_setter)
+        self.assertLess(
+            restore.index("s_axis_raw->exposcale_ ="),
+            restore.index("s_axis_raw->updateExpoCurve()"),
+        )
+
+    def test_axis_position_uses_cached_range_reciprocal_with_bounded_error(self):
+        update = function_body(self.ffb_task, "void update()")
+        recalculate = function_body(self.ffb_task, "void updateRangeScale()")
+        range_setter = self.ffb_task.split('extern "C" void ffb_set_axis_range(float v)', 1)[1].split(
+            'extern "C" void ffb_set_axis_maxtq(float v)', 1
+        )[0]
+        restore = function_body(self.ffb_task, "static void ffb_load_axis_params_internal(void) {")
+
+        self.assertIn("float inverseHalfRange_", self.ffb_task)
+        self.assertIn("inverseHalfRange_ = 1.0f / (rangeDegrees_ / 2.0f)", recalculate)
+        self.assertIn("float pos_f = degrees * inverseHalfRange_", update)
+        self.assertNotIn("degrees / halfRange", update)
+        self.assertIn("s_axis_raw->updateRangeScale()", range_setter)
+        self.assertLess(
+            restore.index("s_axis_raw->rangeDegrees_ ="),
+            restore.index("s_axis_raw->updateRangeScale()"),
+        )
+
+        import struct
+
+        def f32(value):
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+
+        max_position_error_counts = 0.0
+        ranges = list(range(1, 65535, 137)) + [1.0, 1.1, 899.3, 900.0, 65534.0]
+        for range_degrees in ranges:
+            half_range = f32(f32(range_degrees) / f32(2.0))
+            reciprocal = f32(f32(1.0) / half_range)
+            for position in range(-100, 101):
+                degrees = f32(half_range * f32(position / 100.0))
+                divided = f32(degrees / half_range)
+                multiplied = f32(degrees * reciprocal)
+                max_position_error_counts = max(
+                    max_position_error_counts,
+                    abs(divided - multiplied) * 32767.0,
+                )
+        self.assertLess(max_position_error_counts, 0.02)
 
     def test_usb_unmount_resets_pending_torque_and_slew_history(self):
         reset = self.ffb_task.split("void reset_ffb_state()", 1)[1].split("};", 1)[0]
@@ -873,7 +953,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         lock_start = thread.index("EffectsStateGuard effect_output_lock")
         acquired = thread.index("const uint32_t lock_acquired_us = micros()")
         update = thread.index("s_axis_raw->update()")
-        hold = thread.index("const uint32_t lock_hold_us = micros() - lock_acquired_us")
+        hold = thread.index("lock_hold_us = micros() - lock_acquired_us")
         unlock_scope_end = thread.index("const uint32_t calc_us", hold)
         self.assertLess(wait_start, lock_start)
         self.assertLess(lock_start, acquired)
@@ -886,6 +966,49 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         format_string = perf_handler.split("snprintf(r, s,", 1)[1].split('"', 2)[1]
         worst_case_reply = format_string.replace("%lu", "4294967295")
         self.assertLessEqual(len(worst_case_reply), 127)
+
+    def test_ffb_cycle_diagnostics_measure_submicrosecond_work_without_changing_output(self):
+        thread = self.ffb_task.split("static void ffb_thread(void *arg)", 1)[1].split(
+            "// -------------------- Init", 1
+        )[0]
+        cycle_init = function_body(self.ffb_task, "static void ffb_enable_cycle_counter()")
+        cycle_command = self.commands.split("static int h_sys_ffbcycles", 1)[1].split(
+            "// ========================", 1
+        )[0]
+
+        self.assertIn("CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk", cycle_init)
+        self.assertIn("DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk", cycle_init)
+        self.assertLess(thread.index("ffb_enable_cycle_counter()"), thread.index("while (true)"))
+        self.assertIn("DWT->CYCCNT - calc_start_cycles", thread)
+        self.assertIn("DWT->CYCCNT - loop_start_cycles", thread)
+        self.assertIn("update_diag_max(s_ffb_calc_cycles_max", thread)
+        self.assertIn("update_diag_max(s_ffb_loop_cycles_max", thread)
+        self.assertIn("ffb_diag_calc_cycles_max()", cycle_command)
+        self.assertIn("ffb_diag_loop_cycles_max()", cycle_command)
+        self.assertIn('"ffbcycles"', self.commands)
+
+        reset = self.ffb_task.split('extern "C" void ffb_diag_reset_perf(void)', 1)[1].split(
+            "}", 1
+        )[0]
+        self.assertIn("s_ffb_calc_cycles_max.store(0", reset)
+        self.assertIn("s_ffb_loop_cycles_max.store(0", reset)
+
+    def test_ffb_timing_max_updates_happen_after_releasing_effect_mutex(self):
+        thread = self.ffb_task.split("static void ffb_thread(void *arg)", 1)[1].split(
+            "// -------------------- Init", 1
+        )[0]
+        critical_section = thread.split("EffectsStateGuard effect_output_lock", 1)[1].split(
+            "\n        }\n", 1
+        )[0]
+
+        for metric_update in (
+            "update_diag_max(s_ffb_lock_wait_max_us",
+            "update_diag_max(s_ffb_lock_hold_max_us",
+            "update_diag_max(s_ffb_calc_cycles_max",
+            "s_ffb_lock_wait_last_us.store",
+        ):
+            self.assertNotIn(metric_update, critical_section)
+            self.assertIn(metric_update, thread)
 
     def test_ffb_sampling_is_synchronized_to_every_eighth_control_loop_cycle(self):
         thread = self.ffb_task.split("static void ffb_thread(void *arg)", 1)[1].split(
@@ -933,10 +1056,76 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         inactive_path = calculate.split("if(!isActive())", 1)[1].split("int32_t force = 0", 1)[0]
         self.assertIn("axis->setEffectTorque(0)", inactive_path)
 
-    def test_periodic_phase_product_uses_wide_intermediate_and_unsigned_storage(self):
+    def test_periodic_phase_conversion_uses_exact_32_bit_intermediate(self):
         self.assertIn("uint16_t phase = 0", self.defs)
-        self.assertIn("(uint64_t)(effect->phase % 36000u) * period_us", self.effects)
-        self.assertIn("report->phase % 36000u", self.hid)
+        self.assertIn("uint16_t period = 1", self.defs)
+        self.assertIn("uint32_t period_ms = effect->period", self.effects)
+        self.assertNotIn("std::max<uint32_t>", self.effects)
+        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+            "if (effect->type == FFB_EFFECT_SQUARE)", 1
+        )[0]
+        self.assertIn("const uint32_t phase_centidegrees = effect->phase", periodic)
+        self.assertNotIn("effect->phase % 36000u", periodic)
+        self.assertIn("(phase_centidegrees * period_ms) / 36u", periodic)
+        self.assertNotIn("uint64_t", periodic)
+        self.assertIn("effect->phase = (uint16_t)(report->phase % 36000u)", self.hid)
+        self.assertIn("effect->period = clip<uint32_t,uint32_t>(report->period,1,0x7fff)", self.hid)
+
+    def test_periodic_cycle_fold_uses_one_conditional_subtract(self):
+        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+            "if (effect->type == FFB_EFFECT_SQUARE)", 1
+        )[0]
+        self.assertIn("uint32_t cycle_pos_us = elapsed_phase_us + phase_us", periodic)
+        self.assertIn("if (cycle_pos_us >= period_us)", periodic)
+        self.assertIn("cycle_pos_us -= period_us", periodic)
+        self.assertNotIn("% period_us", periodic)
+
+        # Both inputs are in [0, period_us), so one subtraction is exactly
+        # equivalent to modulo, and the sum remains far below uint32_t max.
+        for period_ms in (1, 2, 7, 1000, 32767):
+            period_us = period_ms * 1000
+            elapsed_ticks = {0, period_ms // 2, period_ms - 1}
+            for elapsed_ms in elapsed_ticks:
+                elapsed_phase_us = elapsed_ms * 1000
+                self.assertLess(elapsed_phase_us, period_us)
+                for phase_centidegrees in range(36000):
+                    phase_us = phase_centidegrees * period_ms // 36
+                    summed_phase_us = elapsed_phase_us + phase_us
+                    folded_phase_us = summed_phase_us
+                    if folded_phase_us >= period_us:
+                        folded_phase_us -= period_us
+                    self.assertEqual(folded_phase_us, summed_phase_us % period_us)
+                    self.assertLess(summed_phase_us, 1 << 32)
+
+    def test_periodic_phase_normalization_uses_cached_reciprocal_with_bounded_error(self):
+        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+            "if (effect->type == FFB_EFFECT_SQUARE)", 1
+        )[0]
+        set_periodic = self.hid.split("void HidFFB::set_periodic(", 1)[1].split(
+            "void HidFFB::reset_ffb(", 1
+        )[0]
+        self.assertIn("float periodScale = 0.001f", self.defs)
+        self.assertIn("effect->periodScale = 1.0f / ((float)effect->period * 1000.0f)", set_periodic)
+        self.assertIn("phase_norm = (float)cycle_pos_us * effect->periodScale", periodic)
+        self.assertNotIn("phase_norm = (float)cycle_pos_us /", periodic)
+
+        import math
+        import struct
+
+        def f32(value):
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+
+        max_torque_error = 0.0
+        for period_ms in list(range(1, 32768, 113)) + [32767]:
+            period_us = period_ms * 1000
+            reciprocal = f32(1.0 / f32(period_us))
+            positions = {0, 1, period_us // 4, period_us // 2, period_us - 1}
+            for cycle_pos_us in positions:
+                divided_phase = f32(f32(cycle_pos_us) / f32(period_us))
+                multiplied_phase = f32(f32(cycle_pos_us) * reciprocal)
+                phase_error = abs(multiplied_phase - divided_phase)
+                max_torque_error = max(max_torque_error, phase_error * 2.0 * math.pi * 32767.0)
+        self.assertLess(max_torque_error, 0.1)
 
     def test_periodic_sine_uses_bounded_error_table_interpolation(self):
         self.assertIn('#include "utils.hpp"', self.effects)
@@ -1088,16 +1277,21 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         signed_before_start = before_start - (1 << 32)
         self.assertEqual(signed_before_start, -26)
 
-    def test_maximum_periodic_phase_product_is_64_bit_safe(self):
-        phase = 35999
-        period_us = 32767 * 1000
-        phase_us = phase * period_us // 36000
-        # The worst-case product exceeds uint32_t but fits uint64_t.
-        max_product = 35999 * period_us
-        self.assertGreater(max_product, (1 << 32) - 1)
-        self.assertLess(max_product, (1 << 64))
-        self.assertGreaterEqual(phase_us, 0)
-        self.assertLess(phase_us, period_us)
+    def test_periodic_phase_32_bit_formula_matches_original_for_full_phase_range(self):
+        maximum_period_ms = 32767
+        max_product = 35999 * maximum_period_ms
+        self.assertLessEqual(max_product, (1 << 32) - 1)
+
+        # floor(phase * period_ms * 1000 / 36000) is exactly
+        # floor(phase * period_ms / 36); validate the full HID phase range.
+        for period_ms in (1, 7, 1000, maximum_period_ms):
+            period_us = period_ms * 1000
+            for phase in range(36000):
+                original_phase_us = phase * period_us // 36000
+                optimized_phase_us = phase * period_ms // 36
+                self.assertEqual(optimized_phase_us, original_phase_us)
+                self.assertGreaterEqual(optimized_phase_us, 0)
+                self.assertLess(optimized_phase_us, period_us)
 
     def test_periodic_phase_does_not_jump_when_micros_wraps(self):
         periodic = self.effects.split("uint32_t period_ms =", 1)[1].split("if (effect->type == FFB_EFFECT_SQUARE)", 1)[0]

@@ -18,6 +18,7 @@
 #include "Axis.h"          // stub interface com metric_t
 #include "ffb_defs.h"
 #include "cmsis_os.h"
+#include "core_cm4.h"
 #include "tusb.h"
 
 #include "odrive_bridge.h"
@@ -57,6 +58,8 @@ static std::atomic<int32_t> s_diag_last_torque_int32{0};
 static std::atomic<uint32_t> s_ffb_loop_last_us{0};
 static std::atomic<uint32_t> s_ffb_loop_max_us{0};
 static std::atomic<uint32_t> s_ffb_calc_max_us{0};
+static std::atomic<uint32_t> s_ffb_loop_cycles_max{0};
+static std::atomic<uint32_t> s_ffb_calc_cycles_max{0};
 static std::atomic<uint32_t> s_ffb_lock_wait_last_us{0};
 static std::atomic<uint32_t> s_ffb_lock_wait_max_us{0};
 static std::atomic<uint32_t> s_ffb_lock_hold_max_us{0};
@@ -93,6 +96,12 @@ static void update_diag_min_float(std::atomic<float>& minimum, float value) {
     }
 }
 
+static void ffb_enable_cycle_counter() {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
 static_assert(std::atomic<osSemaphoreId>::is_always_lock_free,
               "FFB ISR semaphore handle must be published lock-free");
 static std::atomic<osSemaphoreId> s_ffb_tick_sem{nullptr};
@@ -111,6 +120,7 @@ public:
     // ----------- Params ajustáveis via CDC (axis.*) -------------------------
     // Volante (escalonamento básico)
     float rangeDegrees_  = 900.0f;    // steering lock-to-lock
+    float inverseHalfRange_ = 1.0f / 450.0f; // Cached position scale; range is changed outside the control sample.
     float maxTorque_Nm_  = 5.0f;      // scaling do torque FFB (int32 -> Nm)
     float fxRatio_       = DEFAULT_AXIS_FX_RATIO; // 0..1 — escala final
 
@@ -130,6 +140,7 @@ public:
     // 0 = linear (default). Positivo = curva concentrada nas pontas (ex: ABS center).
     int16_t expo_      = 0;
     uint8_t exposcale_ = 100;          // divisor pro expo (default 100 = 1.0)
+    float expoCurve_   = 1.0f;         // Cache de expo/exposcale + 1, atualizado fora da amostra de controle.
 
     // axisInverted_ : inverse uniquement la position reportée au jeu (HID IN).
     //   getScaledAxisPos() retourne -pos quand true.  Commande: axis.invert
@@ -276,6 +287,14 @@ public:
 
     metric_t *getMetrics() override { return &metrics_; }
 
+    void updateRangeScale() {
+        inverseHalfRange_ = 1.0f / (rangeDegrees_ / 2.0f);
+    }
+
+    void updateExpoCurve() {
+        expoCurve_ = (float)expo_ / (float)exposcale_ + 1.0f;
+    }
+
     void update() {
         const uint32_t sample_time_us = micros();
         uint32_t elapsed_us = hasLastUpdate_ ? sample_time_us - lastUpdateUs_ : 1000u;
@@ -296,9 +315,7 @@ public:
         // pos_scaled_16b, metrics_.posDegrees, endstops, speed/accel)
         // automaticamente trabalha em torno do "novo zero".
         float degrees = turns * 360.0f - zeroOffset_;
-        float halfRange = rangeDegrees_ / 2.0f;
-
-        float pos_f = degrees / halfRange;
+        float pos_f = degrees * inverseHalfRange_;
         if (pos_f > 1.0f) pos_f = 1.0f;
         if (pos_f < -1.0f) pos_f = -1.0f;
 
@@ -310,13 +327,12 @@ public:
         if (expo_ != 0 && exposcale_ > 0) {
             float sign = pos_f >= 0 ? 1.0f : -1.0f;
             float absp = pos_f >= 0 ? pos_f : -pos_f;
-            float k = (float)expo_ / (float)exposcale_;
-            if (k == 1.0f) {
+            const float curve = expoCurve_;
+            if (curve == 2.0f) {
                 absp *= absp;
-            } else if (k == 2.0f) {
+            } else if (curve == 3.0f) {
                 absp = (absp * absp) * absp;
             } else {
-                float curve = k + 1.0f;
                 // For every positive exponent, x is in [0,1] and the power
                 // remains bounded there. Avoid artificial exponent cutoffs:
                 // they caused large response jumps to the linear fallback.
@@ -437,6 +453,7 @@ extern "C" void ffb_task_signal_tick_from_isr(void) {
 
 static void ffb_thread(void *arg) {
     (void)arg;
+    ffb_enable_cycle_counter();
     const uint32_t period_ms = 1; // 1 kHz
     osSemaphoreId tick_sem = s_ffb_tick_sem.load(std::memory_order_acquire);
     if (tick_sem == nullptr) return;
@@ -444,6 +461,7 @@ static void ffb_thread(void *arg) {
     bool has_previous_sample = false;
     while (true) {
         osSemaphoreWait(tick_sem, osWaitForever);
+        const uint32_t loop_start_cycles = DWT->CYCCNT;
         const uint32_t loop_start_us = micros();
         if (has_previous_sample) {
             const uint32_t sample_interval_us = loop_start_us - previous_sample_start_us;
@@ -456,24 +474,32 @@ static void ffb_thread(void *arg) {
         has_previous_sample = true;
 
         const uint32_t lock_wait_start_us = micros();
+        uint32_t lock_wait_us = 0;
+        uint32_t lock_hold_us = 0;
+        uint32_t calc_cycles = 0;
         {
             // Keep the effect-state lock through torque commit. USB effect
             // updates and unmount failsafe then cannot interleave between a
             // completed force sample and writing that sample to the ODrive.
             EffectsStateGuard effect_output_lock(*s_effects_calc);
             const uint32_t lock_acquired_us = micros();
-            const uint32_t lock_wait_us = lock_acquired_us - lock_wait_start_us;
-            s_ffb_lock_wait_last_us.store(lock_wait_us, std::memory_order_relaxed);
-            update_diag_max(s_ffb_lock_wait_max_us, lock_wait_us);
+            lock_wait_us = lock_acquired_us - lock_wait_start_us;
             // Axis settings are changed by the serial task and feed directly
             // into position scaling, local effects, and the torque conversion.
             // Keep each output sample on one coherent settings snapshot.
+            const uint32_t calc_start_cycles = DWT->CYCCNT;
             s_axis_raw->update();
             s_effects_calc->calculateEffects(s_axes_vec);
             s_axis_raw->commitPendingTorque();
-            const uint32_t lock_hold_us = micros() - lock_acquired_us;
-            update_diag_max(s_ffb_lock_hold_max_us, lock_hold_us);
+            calc_cycles = DWT->CYCCNT - calc_start_cycles;
+            lock_hold_us = micros() - lock_acquired_us;
         }
+        // Keep diagnostic atomics outside the effect-state critical section so
+        // instrumentation does not extend USB update contention or lock hold.
+        s_ffb_lock_wait_last_us.store(lock_wait_us, std::memory_order_relaxed);
+        update_diag_max(s_ffb_lock_wait_max_us, lock_wait_us);
+        update_diag_max(s_ffb_lock_hold_max_us, lock_hold_us);
+        update_diag_max(s_ffb_calc_cycles_max, calc_cycles);
         const uint32_t calc_us = micros() - loop_start_us;
         update_diag_max(s_ffb_calc_max_us, calc_us);
 
@@ -546,6 +572,8 @@ static void ffb_thread(void *arg) {
             tud_hid_report(1, ((uint8_t*)&rpt) + 1, sizeof(rpt) - 1);
         }
 
+        const uint32_t loop_cycles = DWT->CYCCNT - loop_start_cycles;
+        update_diag_max(s_ffb_loop_cycles_max, loop_cycles);
         const uint32_t loop_us = micros() - loop_start_us;
         s_ffb_loop_last_us.store(loop_us, std::memory_order_relaxed);
         update_diag_max(s_ffb_loop_max_us, loop_us);
@@ -743,6 +771,7 @@ static void ffb_load_axis_params_internal(void) {
     if (Flash_Read(ADR_AXIS1_DEGREES, &v, false) && v != 0xFFFF && v > 0) {
         s_axis_raw->rangeDegrees_ = sanitize_axis_range((float)v);
     }
+    s_axis_raw->updateRangeScale();
     if (Flash_Read(ADR_AXIS1_POWER, &v, false) && v != 0xFFFF && v > 0) {
         s_axis_raw->maxTorque_Nm_ = sanitize_axis_torque((float)v / 100.0f);
     }
@@ -766,6 +795,7 @@ static void ffb_load_axis_params_internal(void) {
     if (Flash_Read(ADR_AXIS1_ENDSTOP, &v, false) && v != 0xFFFF && v > 0 && v <= 255) {
         s_axis_raw->exposcale_ = (uint8_t)(v & 0xFF);
     }
+    s_axis_raw->updateExpoCurve();
     if (Flash_Read(ADR_AXIS1_ENC_RATIO, &v, false) && v != 0xFFFF) {
         s_axis_raw->endstopStrength_ = (uint8_t)(v & 0xFF);
         // High byte: endstopDamper_. Legacy images have no format marker and
@@ -926,6 +956,8 @@ extern "C" int ffb_diag_ffb_active_flag(void) {
 extern "C" uint32_t ffb_diag_loop_last_us(void) { return s_ffb_loop_last_us.load(std::memory_order_relaxed); }
 extern "C" uint32_t ffb_diag_loop_max_us(void) { return s_ffb_loop_max_us.load(std::memory_order_relaxed); }
 extern "C" uint32_t ffb_diag_calc_max_us(void) { return s_ffb_calc_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_loop_cycles_max(void) { return s_ffb_loop_cycles_max.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_calc_cycles_max(void) { return s_ffb_calc_cycles_max.load(std::memory_order_relaxed); }
 extern "C" uint32_t ffb_diag_lock_wait_max_us(void) { return s_ffb_lock_wait_max_us.load(std::memory_order_relaxed); }
 extern "C" uint32_t ffb_diag_lock_hold_max_us(void) { return s_ffb_lock_hold_max_us.load(std::memory_order_relaxed); }
 extern "C" uint32_t ffb_diag_loop_overruns(void) { return s_ffb_loop_overruns.load(std::memory_order_relaxed); }
@@ -937,6 +969,8 @@ extern "C" void ffb_diag_reset_perf(void) {
     s_ffb_loop_last_us.store(0, std::memory_order_relaxed);
     s_ffb_loop_max_us.store(0, std::memory_order_relaxed);
     s_ffb_calc_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_loop_cycles_max.store(0, std::memory_order_relaxed);
+    s_ffb_calc_cycles_max.store(0, std::memory_order_relaxed);
     s_ffb_lock_wait_last_us.store(0, std::memory_order_relaxed);
     s_ffb_lock_wait_max_us.store(0, std::memory_order_relaxed);
     s_ffb_lock_hold_max_us.store(0, std::memory_order_relaxed);
@@ -1493,6 +1527,7 @@ extern "C" void ffb_set_axis_range(float v) {
     if (!s_axis_raw || !s_effects_calc) return;
     EffectsStateGuard state_lock(*s_effects_calc);
     s_axis_raw->rangeDegrees_ = sanitize_axis_range(v);
+    s_axis_raw->updateRangeScale();
 }
 extern "C" void ffb_set_axis_maxtq(float v) {
     if (!s_axis_raw || !s_effects_calc) return;
@@ -1586,6 +1621,7 @@ extern "C" void ffb_set_axis_expo(int v) {
     if (!s_axis_raw || !s_effects_calc) return;
     EffectsStateGuard state_lock(*s_effects_calc);
     s_axis_raw->expo_ = (int16_t)(v < -32767 ? -32767 : v > 32767 ? 32767 : v);
+    s_axis_raw->updateExpoCurve();
 }
 extern "C" int ffb_get_axis_exposcale(void) {
     if (!s_axis_raw || !s_effects_calc) return 100;
@@ -1596,6 +1632,7 @@ extern "C" void ffb_set_axis_exposcale(int v) {
     if (!s_axis_raw || !s_effects_calc) return;
     EffectsStateGuard state_lock(*s_effects_calc);
     s_axis_raw->exposcale_ = (uint8_t)(v < 1 ? 1 : v > 255 ? 255 : v);
+    s_axis_raw->updateExpoCurve();
 }
 extern "C" void ffb_axis_zeroenc(void) {
     if (!s_axis_raw || !s_effects_calc) return;

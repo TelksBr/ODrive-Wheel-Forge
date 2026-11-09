@@ -289,18 +289,22 @@ float EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect, uint32_
 	case FFB_EFFECT_SAWTOOTHDOWN:
 	case FFB_EFFECT_SINE:
 	{
-		// Bug 8: Normalização de tempo por aritmética modular de inteiros para precisão absoluta (24-bit IEEE 754)
-		// sem degradação ou jitter após horas de uso contínuo, e com proteção total contra divisão por zero (period == 0).
-		uint32_t period_ms = std::max<uint32_t>((uint32_t)effect->period, 1);
+		// Period defaults to 1 ms and HID updates clamp it to [1, 32767].
+		uint32_t period_ms = effect->period;
 		uint32_t period_us = period_ms * 1000;
 		// Use the same wrap-safe millisecond clock as effect start/duration.
 		// Taking modulo before scaling keeps the phase stable across micros()
 		// wrap every 71 minutes, even for infinite periodic effects.
 		uint32_t elapsed_ms = now_ms - effect->startTime;
 		uint32_t elapsed_phase_us = (elapsed_ms % period_ms) * 1000u;
-		uint32_t phase_us = (uint32_t)(((uint64_t)(effect->phase % 36000u) * period_us) / 36000u);
-		uint32_t cycle_pos_us = (elapsed_phase_us + phase_us) % period_us;
-		float phase_norm = (float)cycle_pos_us / (float)period_us; // Exatamente no intervalo [0.0, 1.0)
+		const uint32_t phase_centidegrees = effect->phase;
+		// 1000 / 36000 reduces exactly to 1 / 36. The HID period is capped
+		// at 32767 ms, so the maximum product is 35999 * 32767 < UINT32_MAX.
+		uint32_t phase_us = (phase_centidegrees * period_ms) / 36u;
+		uint32_t cycle_pos_us = elapsed_phase_us + phase_us;
+		// Both terms are already within one period, so at most one fold is needed.
+		if (cycle_pos_us >= period_us) cycle_pos_us -= period_us;
+		float phase_norm = (float)cycle_pos_us * effect->periodScale; // [0.0, 1.0), scaled when the HID period changes
 
 		if (effect->type == FFB_EFFECT_SQUARE) {
 			int32_t sqr = (phase_norm < 0.5f) ? -magnitude : magnitude;
@@ -411,7 +415,7 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 			if (fabs (speed) < speedRampupCeil) {								// if speed in the range to rampup we apply a sinus curbe to ramup
 
 				float phaseRad = M_PI * ((fabs (speed) / speedRampupCeil) - 0.5);// we start to compute the normalized angle (speed / normalizedSpeed@5%) and translate it of -1/2PI to translate sin on 1/2 periode
-				rampupFactor = ( 1 + sin(phaseRad ) ) / 2;						// sin value is -1..1 range, we translate it to 0..2 and we scale it by 2
+					rampupFactor = (1.0f + our_arm_sin_f32(phaseRad)) / 2.0f;				// Half-sine ramp from 0 to 1.
 
 			}
 

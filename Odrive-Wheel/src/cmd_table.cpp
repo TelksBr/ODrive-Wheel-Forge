@@ -925,6 +925,8 @@ extern uint32_t ffb_diag_hidout_efop(void);
 extern uint32_t ffb_diag_loop_last_us(void);
 extern uint32_t ffb_diag_loop_max_us(void);
 extern uint32_t ffb_diag_calc_max_us(void);
+extern uint32_t ffb_diag_loop_cycles_max(void);
+extern uint32_t ffb_diag_calc_cycles_max(void);
 extern uint32_t ffb_diag_lock_wait_max_us(void);
 extern uint32_t ffb_diag_lock_hold_max_us(void);
 extern uint32_t ffb_diag_loop_overruns(void);
@@ -966,6 +968,15 @@ static int h_sys_ffbperf(uint8_t, CmdType t, const char*, char *r, size_t s) {
         (unsigned long)ffb_diag_sample_last_us(),
         (unsigned long)ffb_diag_sample_max_us(),
         (unsigned long)ffb_diag_period_overruns());
+    return 0;
+}
+
+// ffbcycles? exposes cycle-resolution maxima for sub-microsecond comparisons.
+static int h_sys_ffbcycles(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_GET) return -1;
+    snprintf(r, s, "C=%lu L=%lu cycles",
+        (unsigned long)ffb_diag_calc_cycles_max(),
+        (unsigned long)ffb_diag_loop_cycles_max());
     return 0;
 }
 
@@ -1097,6 +1108,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "mtstatus",     h_sys_mtstatus },      // boot/warnings/auto-cal
     { "sys",   "fxtest",       h_sys_fxtest },
     { "sys",   "ffbperf",      h_sys_ffbperf },
+    { "sys",   "ffbcycles",    h_sys_ffbcycles },
 
     // odrv.* (read-only; Configurator não escreve hardware aqui)
     { "odrv",  "vbus",         h_odrv_vbus },
