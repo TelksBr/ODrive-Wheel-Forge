@@ -23,6 +23,7 @@
 #include "Axis.h"
 #include "ledEffects.h"
 #include "eeprom_addresses.h"  // ADR_FFB_*
+#include "utils.hpp"            // our_arm_sin_f32 table-interpolated sine
 
 
 #define EFFECT_STATE_INACTIVE 0
@@ -310,7 +311,9 @@ int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect, uint3
 			float saw = 1.0f - 2.0f * phase_norm;
 			force_vector = (int32_t)(effect->offset + saw * (float)magnitude);
 		} else if (effect->type == FFB_EFFECT_SINE) {
-			float sine = sinf(2.0f * (float)M_PI * phase_norm) * (float)magnitude;
+			// phase_norm is in [0, 1); table interpolation avoids libm range
+			// reduction in this 1 kHz path with < 1 torque count of peak error.
+			float sine = our_arm_sin_f32(2.0f * (float)M_PI * phase_norm) * (float)magnitude;
 			force_vector = (int32_t)(effect->offset + sine);
 		}
 		break;

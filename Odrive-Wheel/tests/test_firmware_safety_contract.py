@@ -885,6 +885,49 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("(uint64_t)(effect->phase % 36000u) * period_us", self.effects)
         self.assertIn("report->phase % 36000u", self.hid)
 
+    def test_periodic_sine_uses_bounded_error_table_interpolation(self):
+        self.assertIn('#include "utils.hpp"', self.effects)
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        fast_sine = (odrive_root / "MotorControl" / "arm_sin_f32.c").read_text(encoding="utf-8")
+        cmsis_math = (odrive_root / "ThirdParty" / "CMSIS" / "Include" / "arm_math.h").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sinTable_f32[index+1]", fast_sine)
+        self.assertRegex(cmsis_math, r"#define FAST_MATH_TABLE_SIZE\s+512")
+        sine_case = self.effects.split("else if (effect->type == FFB_EFFECT_SINE)", 1)[1].split(
+            "}", 1
+        )[0]
+        self.assertIn("our_arm_sin_f32(2.0f * (float)M_PI * phase_norm)", sine_case)
+        self.assertNotIn("sinf(", sine_case)
+
+        # CMSIS' 512-interval table interpolation has a worst-case linear
+        # interpolation error below h²/8; validate that against one full
+        # cycle in torque counts, including wrap at the last table interval.
+        import math
+        import struct
+
+        def f32(value):
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+
+        table_size = 512
+        table = [f32(math.sin(2.0 * math.pi * i / table_size)) for i in range(table_size + 1)]
+        max_error_counts = 0.0
+        for sample in range(65536):
+            phase = f32(sample / 65536.0)
+            phase_radians = f32(f32(f32(2.0) * f32(math.pi)) * phase)
+            input_turns = f32(phase_radians * f32(0.159154943092))
+            input_turns -= math.floor(input_turns)
+            table_position = f32(f32(table_size) * f32(input_turns))
+            index = int(table_position)
+            fraction = f32(table_position - index)
+            estimate = f32(
+                f32(f32(1.0 - fraction) * table[index])
+                + f32(fraction * table[index + 1])
+            )
+            reference = math.sin(2.0 * math.pi * sample / 65536.0)
+            max_error_counts = max(max_error_counts, abs(estimate - reference) * 32767.0)
+        self.assertLess(max_error_counts, 0.7)
+
     def test_ramp_levels_decode_signed_hid_torque(self):
         ramp = self.defs.split("} __attribute__((packed)) FFB_SetRamp_Data_t;", 1)[0].rsplit("typedef struct", 1)[1]
         self.assertRegex(ramp, r"\bint16_t\s+startLevel")
