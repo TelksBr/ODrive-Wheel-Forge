@@ -10,7 +10,9 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin the known-good ARM GCC environment while Ubuntu 26.04 / GCC 14.2
+    # compatibility is validated for this firmware.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
