@@ -89,4 +89,4 @@ jobs:
           ./Odrive-Wheel/build/odrive-wheel.hex
           ./Odrive-Wheel/build/odrive-wheel.elf
         prerelease: false
-        generate_release_notes: true
+        body_path: ./Odrive-Wheel/RELEASE_NOTES_${{ github.ref_name }}.md
