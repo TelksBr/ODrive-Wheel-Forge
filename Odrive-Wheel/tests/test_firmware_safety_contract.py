@@ -225,6 +225,16 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         )
         self.assertLess(set_linear_count.index("cpu_enter_critical()"),
                         set_linear_count.index("publish_ffb_motion_snapshot("))
+        self.assertLess(set_linear_count.index("publish_ffb_motion_snapshot("),
+                        set_linear_count.index("cpu_exit_critical(prim)"))
+        offset_calibration = function_body(encoder, "bool Encoder::run_offset_calibration()")
+        offset_snapshot_section = offset_calibration.split("CRITICAL_SECTION() {", 1)[1].split(
+            "\n    }", 1
+        )[0]
+        self.assertIn("publish_ffb_motion_snapshot(", offset_snapshot_section)
+        main_source = (odrive_root / "MotorControl" / "main.cpp").read_text(encoding="utf-8")
+        control_loop = function_body(main_source, "void ODrive::control_loop_cb(uint32_t timestamp)")
+        self.assertIn("axis.encoder_.update();", control_loop)
         self.assertNotIn("int32_t cnt = axes[0].encoder_.shadow_count_", bridge)
         self.assertNotIn("encoder_.vel_estimate_.any()", bridge)
         self.assertIn("encoder_.get_ffb_pos_turns_snapshot()", bridge)
