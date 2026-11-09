@@ -1,6 +1,8 @@
 #ifndef __FOC_HPP
 #define __FOC_HPP
 
+#include <atomic>
+
 #include "phase_control_law.hpp"
 #include "component.hpp"
 
@@ -12,6 +14,9 @@
  */
 class FieldOrientedController : public AlphaBetaFrameController, public ComponentBase {
 public:
+    static_assert(std::atomic<float>::is_always_lock_free,
+                  "FFB current telemetry snapshot must be lock-free in the control loop");
+
     void update(uint32_t timestamp) final;
 
     void reset() final;
@@ -51,6 +56,9 @@ public:
     float ibeta_measured_for_interface() const {
         return Ialpha_beta_measured_.has_value() ? Ialpha_beta_measured_->second : 0.0f;
     }
+    float get_ffb_iq_measured_snapshot() const {
+        return ffb_iq_measured_snapshot_.load(std::memory_order_relaxed);
+    }
 
     // Config - these values are set while this controller is inactive
     std::optional<float2D> pi_gains_; // [V/A, V/As] should be auto set after resistance and inductance measurement
@@ -84,6 +92,7 @@ public:
     std::optional<float2D> Ialpha_beta_measured_; // [A, A]
     float Id_measured_; // [A]
     float Iq_measured_; // [A]
+    std::atomic<float> ffb_iq_measured_snapshot_{0.0f}; // [A], read by FFB/HID telemetry
     float v_current_control_integral_d_ = 0.0f; // [V]
     float v_current_control_integral_q_ = 0.0f; // [V]
     //float mod_to_V_ = 0.0f;

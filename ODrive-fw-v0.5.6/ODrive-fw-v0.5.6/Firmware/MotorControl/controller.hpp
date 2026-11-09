@@ -79,6 +79,9 @@ public:
         input_pos_updated_ = true;
     }
     void set_input_torque(float value) {
+        // Do not let NaN/Inf pass through std::clamp into the current loop.
+        // A non-finite command fails safe to zero torque for every input path.
+        if (!__builtin_isfinite(value)) value = 0.0f;
         input_torque_.store(value, std::memory_order_relaxed);
     }
     float get_input_torque() const {

@@ -11,6 +11,20 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def function_body(source, signature):
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1:index]
+    raise AssertionError(f"Unclosed function body: {signature}")
+
+
 class FirmwareSafetyContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -112,6 +126,38 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertNotIn("controller_.input_torque_", bridge)
         self.assertIn("controller_.set_input_torque(nm)", bridge)
 
+    def test_nonfinite_torque_setpoints_are_zeroed_before_atomic_publication(self):
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        controller_header = (odrive_root / "MotorControl" / "controller.hpp").read_text(encoding="utf-8")
+        setter = function_body(controller_header, "void set_input_torque(float value)")
+        reject = setter.index("if (!__builtin_isfinite(value)) value = 0.0f;")
+        store = setter.index("input_torque_.store(value, std::memory_order_relaxed)")
+        self.assertLess(reject, store)
+
+    def test_ffb_diagnostics_use_lock_free_atomic_counters_and_snapshots(self):
+        counters = (
+            "s_diag_hidout_total", "s_diag_hidout_ctrl", "s_diag_hidout_neweff",
+            "s_diag_hidout_seteff", "s_diag_hidout_cond", "s_diag_hidout_const",
+            "s_diag_hidout_period", "s_diag_hidout_efop", "s_diag_hidout_gain",
+            "s_diag_hidout_other", "s_diag_hidget", "s_diag_set_eff_torque",
+            "s_ffb_loop_overruns", "s_ffb_loop_samples", "s_ffb_period_overruns",
+        )
+        self.assertIn("std::atomic<uint32_t>::is_always_lock_free", self.ffb_task)
+        self.assertIn("compare_exchange_weak", self.ffb_task)
+        for counter in counters:
+            self.assertIn(f"std::atomic<uint32_t> {counter}", self.ffb_task)
+            self.assertIn(f"{counter}.fetch_add(1, std::memory_order_relaxed)", self.ffb_task)
+            self.assertRegex(self.ffb_task, rf"{counter}\.load\(std::memory_order_relaxed\)")
+        for metric in (
+            "s_ffb_loop_last_us", "s_ffb_loop_max_us", "s_ffb_calc_max_us",
+            "s_ffb_lock_wait_last_us", "s_ffb_lock_wait_max_us",
+            "s_ffb_lock_hold_max_us", "s_ffb_sample_last_us", "s_ffb_sample_max_us",
+        ):
+            self.assertIn(f"std::atomic<uint32_t> {metric}", self.ffb_task)
+        self.assertIn("std::atomic<int32_t> s_diag_last_torque_int32", self.ffb_task)
+        self.assertIn("s_diag_last_torque_int32.load(std::memory_order_relaxed)", self.ffb_task)
+        self.assertNotRegex(self.ffb_task, r"volatile\s+(?:uint32_t|int32_t)\s+s_(?:diag|ffb)_")
+
     def test_encoder_position_and_velocity_are_published_as_atomic_ffb_snapshots(self):
         odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
         encoder_header = (odrive_root / "MotorControl" / "encoder.hpp").read_text(encoding="utf-8")
@@ -163,6 +209,134 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("controller_.get_ffb_torque_output_snapshot()", bridge)
         self.assertNotIn("controller_.torque_output_.any()", bridge)
 
+    def test_hid_iq_telemetry_uses_a_lock_free_foc_snapshot(self):
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        foc_header = (odrive_root / "MotorControl" / "foc.hpp").read_text(encoding="utf-8")
+        foc = (odrive_root / "MotorControl" / "foc.cpp").read_text(encoding="utf-8")
+        bridge = (ROOT / "src" / "odrive_bridge.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("std::atomic<float> ffb_iq_measured_snapshot_", foc_header)
+        self.assertIn("std::atomic<float>::is_always_lock_free", foc_header)
+        self.assertIn("ffb_iq_measured_snapshot_.load(std::memory_order_relaxed)", foc_header)
+        output_calculation = foc.index("FieldOrientedController::get_alpha_beta_output")
+        iq_update = foc.index("Iq_measured_ +=", output_calculation)
+        snapshot_publish = foc.index("ffb_iq_measured_snapshot_.store(Iq_measured_", iq_update)
+        self.assertLess(iq_update, snapshot_publish)
+        self.assertIn("get_ffb_iq_measured_snapshot()", bridge)
+        self.assertNotIn("current_control_.Iq_measured_", bridge)
+
+    def test_hid_bus_telemetry_uses_lock_free_snapshots(self):
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        low_level = (odrive_root / "MotorControl" / "low_level.cpp").read_text(encoding="utf-8")
+        motor_header = (odrive_root / "MotorControl" / "motor.hpp").read_text(encoding="utf-8")
+        motor = (odrive_root / "MotorControl" / "motor.cpp").read_text(encoding="utf-8")
+        bridge = (ROOT / "src" / "odrive_bridge.cpp").read_text(encoding="utf-8")
+
+        for snapshot in (
+            "s_ffb_vbus_voltage_snapshot_",
+            "s_ffb_ibus_snapshot_",
+            "s_ffb_brake_current_snapshot_",
+        ):
+            self.assertIn(f"std::atomic<float> {snapshot}", low_level)
+            self.assertIn(f"{snapshot}.load(std::memory_order_relaxed)", low_level)
+        self.assertIn("s_ffb_vbus_voltage_snapshot_.store(vbus_voltage", low_level)
+        self.assertIn("s_ffb_ibus_snapshot_.store(ibus_", low_level)
+        self.assertIn("s_ffb_brake_current_snapshot_.store(brake_resistor_current", low_level)
+        self.assertIn("std::atomic<float> ffb_i_bus_snapshot_", motor_header)
+        self.assertIn("ffb_i_bus_snapshot_.load(std::memory_order_relaxed)", motor_header)
+        bus_write = motor.index("I_bus_ = *i_bus;")
+        self.assertLess(bus_write, motor.index("ffb_i_bus_snapshot_.store(I_bus_", bus_write))
+        self.assertIn("low_level_ffb_get_vbus_snapshot()", bridge)
+        self.assertIn("low_level_ffb_get_ibus_snapshot()", bridge)
+        self.assertIn("get_ffb_i_bus_snapshot()", bridge)
+        self.assertIn("low_level_ffb_get_brake_current_snapshot()", bridge)
+        self.assertNotIn("return odrv.vbus_voltage_;", bridge)
+        self.assertNotIn("return odrv.ibus_;", bridge)
+        self.assertNotIn("return axes[0].motor_.I_bus_;", bridge)
+        self.assertNotIn("return odrv.brake_resistor_current_;", bridge)
+
+    def test_zerowheel_gpio_callback_never_reenters_effect_state_mutex(self):
+        gpio = (ROOT / "src" / "gpio_inputs.cpp").read_text(encoding="utf-8")
+        thread = self.ffb_task.split("static void ffb_thread(void *arg)", 1)[1].split(
+            "// -------------------- Init", 1
+        )[0]
+        gpio_update = gpio.split("extern \"C\" void gpio_inputs_update_report", 1)[1]
+        zero_setter = self.ffb_task.split('extern "C" void ffb_axis_zeroenc(void)', 1)[1].split(
+            "\n}", 1
+        )[0]
+
+        self.assertIn("ffb_axis_zeroenc();", gpio_update)
+        self.assertIn("EffectsStateGuard state_lock(*s_effects_calc)", zero_setter)
+        self.assertLess(thread.index("gpio_inputs_update_report("),
+                        thread.index("EffectsStateGuard axis_report_lock"))
+
+    def test_hid_send_and_telemetry_conversion_are_outside_effect_mutex(self):
+        thread = self.ffb_task.split("static void ffb_thread(void *arg)", 1)[1].split(
+            "// -------------------- Init", 1
+        )[0]
+        lock_start = thread.index("EffectsStateGuard axis_report_lock")
+        lock_scope_end = thread.index("}", lock_start)
+        axis_read = thread.index("getScaledAxisPos()", lock_start)
+        report_write = thread.index("rpt.X =", lock_start)
+        usb_send = thread.index("tud_hid_report(", lock_start)
+
+        self.assertLess(axis_read, lock_scope_end)
+        self.assertLess(lock_scope_end, report_write)
+        self.assertLess(report_write, usb_send)
+
+    def test_gpio_configuration_and_report_state_share_a_mutex(self):
+        gpio = (ROOT / "src" / "gpio_inputs.cpp").read_text(encoding="utf-8")
+        functions = (
+            'void gpio_inputs_init',
+            'void gpio_inputs_update_report',
+            'int gpio_inputs_save',
+            'uint8_t gpio_inputs_get_mode', 'int gpio_inputs_set_mode',
+            'uint8_t gpio_inputs_get_idx', 'int gpio_inputs_set_idx',
+            'uint8_t gpio_inputs_get_invert', 'int gpio_inputs_set_invert',
+            'uint16_t gpio_inputs_get_amin', 'int gpio_inputs_set_amin',
+            'uint16_t gpio_inputs_get_amax', 'int gpio_inputs_set_amax',
+            'uint16_t gpio_inputs_get_filt', 'uint16_t gpio_inputs_read_raw',
+        )
+        for signature in functions:
+            body = function_body(gpio, signature)
+            self.assertIn("GpioConfigGuard guard(s_gpio_cfg_mutex)", body, signature)
+
+        save_body = function_body(gpio, "int gpio_inputs_save")
+        self.assertIn("gpio_cfg_t config_snapshot[GPIO_INPUTS_COUNT]", save_body)
+        lock_scope_end = save_body.index("}")
+        flash_write = save_body.index("Flash_Write(s_addr_cfg[i]")
+        self.assertLess(lock_scope_end, flash_write)
+
+    def test_gpio_mutex_handle_is_published_atomically_during_boot(self):
+        gpio = (ROOT / "src" / "gpio_inputs.cpp").read_text(encoding="utf-8")
+        self.assertIn("std::atomic<osMutexId> s_gpio_cfg_mutex", gpio)
+        self.assertIn("std::atomic<osMutexId>::is_always_lock_free", gpio)
+        self.assertIn("mutex.load(std::memory_order_acquire)", gpio)
+        init = function_body(gpio, "void gpio_inputs_init")
+        create = init.index("osMutexCreate(osMutex(gpioCfgMutex))")
+        publish = init.index("s_gpio_cfg_mutex.store(mutex, std::memory_order_release)", create)
+        guard = init.index("GpioConfigGuard guard(s_gpio_cfg_mutex)", publish)
+        self.assertLess(create, publish)
+        self.assertLess(publish, guard)
+
+    def test_gpio_axis_biquad_state_is_mutex_protected(self):
+        header = (ROOT / "inc" / "gpio_axis_proc.h").read_text(encoding="utf-8")
+        processor = (ROOT / "src" / "gpio_axis_proc.cpp").read_text(encoding="utf-8")
+        self.assertIn("cpp_freertos::MutexStandard state_mutex_", header)
+        functions = (
+            "void GpioAxisProcessor::init",
+            "uint16_t GpioAxisProcessor::filterRaw",
+            "bool GpioAxisProcessor::isFilterEnabled",
+            "void GpioAxisProcessor::setFilterEnabled",
+            "bool GpioAxisProcessor::isAutorangeEnabled",
+            "void GpioAxisProcessor::setAutorangeEnabled",
+            "float GpioAxisProcessor::getFilterFreq",
+            "void GpioAxisProcessor::setFilterFreq",
+        )
+        for signature in functions:
+            body = function_body(processor, signature)
+            self.assertIn("AxisProcGuard state_lock(state_mutex_)", body, signature)
+
     def test_restored_filter_profile_is_limited_to_allocated_slots(self):
         restore = self.effects.split("void EffectsCalculator::restoreFlash()", 1)[1].split(
             "void EffectsCalculator::saveFlash", 1
@@ -185,9 +359,9 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_hid_diagnostic_report_ids_match_the_hid_definitions(self):
         bridge = self.ffb_task.split("// Diagnóstico — incrementa contador específico por report_id", 1)[1]
-        self.assertIn("case 3:  s_diag_hidout_cond++", bridge)
-        self.assertIn("case 4:  s_diag_hidout_period++", bridge)
-        self.assertNotIn("case 2:  s_diag_hidout_period++", bridge)
+        self.assertIn("case 3:  s_diag_hidout_cond.fetch_add(1, std::memory_order_relaxed)", bridge)
+        self.assertIn("case 4:  s_diag_hidout_period.fetch_add(1, std::memory_order_relaxed)", bridge)
+        self.assertNotIn("case 2:  s_diag_hidout_period.fetch_add", bridge)
         self.assertIn("(s_axis_raw->maxTorque_Nm_ * s_axis_raw->fxRatio_)", self.ffb_task)
 
     def test_effect_start_and_ramp_elapsed_use_wrap_safe_millisecond_clock(self):
@@ -554,13 +728,33 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             "void I2C1_EV_IRQHandler", 1
         )[0]
 
-        self.assertIn("osSemaphoreWait(s_ffb_tick_sem, osWaitForever)", thread)
+        self.assertIn("osSemaphoreWait(tick_sem, osWaitForever)", thread)
         self.assertNotIn("osDelayUntil", thread)
         self.assertIn("if (++s_ffb_tick_divider == 8)", signal)
-        self.assertIn("osSemaphoreRelease(s_ffb_tick_sem)", signal)
+        self.assertIn("osSemaphoreRelease(tick_sem)", signal)
         self.assertIn("ffb_task_signal_tick_from_isr()", control_loop)
         self.assertLess(control_loop.index("odrv.control_loop_cb(timestamp)"),
                         control_loop.index("ffb_task_signal_tick_from_isr()"))
+
+    def test_ffb_isr_semaphore_handle_is_published_atomically(self):
+        self.assertIn("std::atomic<osSemaphoreId> s_ffb_tick_sem", self.ffb_task)
+        self.assertIn("std::atomic<osSemaphoreId>::is_always_lock_free", self.ffb_task)
+        signal = self.ffb_task.split(
+            'extern "C" void ffb_task_signal_tick_from_isr(void)', 1
+        )[1].split("\n}", 1)[0]
+        init = self.ffb_task.split('extern "C" void ffb_task_init(void)', 1)[1].split(
+            "// Lê axis params", 1
+        )[0]
+
+        self.assertIn("s_ffb_tick_sem.load(std::memory_order_acquire)", signal)
+        self.assertIn("osSemaphoreRelease(tick_sem)", signal)
+        create = init.index("osSemaphoreCreate(osSemaphore(ffbTickSem), 1)")
+        empty = init.index("osSemaphoreWait(tick_sem, 0)", create)
+        publish = init.index("s_ffb_tick_sem.store(tick_sem, std::memory_order_release)", empty)
+        spawn = init.index("osThreadCreate(osThread(ffbThread), NULL)", publish)
+        self.assertLess(create, empty)
+        self.assertLess(empty, publish)
+        self.assertLess(publish, spawn)
 
     def test_effect_loop_advances_axis_slew_only_once_per_1khz_sample(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[0]

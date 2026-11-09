@@ -800,6 +800,7 @@ void Motor::pwm_update_cb(uint32_t output_timestamp) {
     }
 
     I_bus_ = *i_bus;
+    ffb_i_bus_snapshot_.store(I_bus_, std::memory_order_relaxed);
 
     // Only check I_bus hard limits when armed, and NOT during motor calibration.
     // v0.5.1 parity: v0.5.1 has no ISR-side I_bus check at all; the check was

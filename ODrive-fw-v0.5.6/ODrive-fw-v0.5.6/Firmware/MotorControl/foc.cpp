@@ -110,6 +110,7 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
         Id_measured_ = 0.0f;
         Iq_measured_ = 0.0f;
     }
+    ffb_iq_measured_snapshot_.store(Iq_measured_, std::memory_order_relaxed);
 
 
     float mod_to_V = (2.0f / 3.0f) * vbus_voltage;

@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <vector>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -34,31 +35,46 @@ static ODriveLocalAxis *s_axis_raw;
 static constexpr uint16_t AXIS_CONFIG_ENDSTOP_DAMPER_VALID = 0x0004;
 static constexpr float DEFAULT_AXIS_FX_RATIO = 1.0f;
 
-static volatile uint32_t s_diag_hidout_total = 0;
-static volatile uint32_t s_diag_hidout_ctrl = 0;
-static volatile uint32_t s_diag_hidout_neweff = 0;
-static volatile uint32_t s_diag_hidout_seteff = 0;
-static volatile uint32_t s_diag_hidout_cond = 0;
-static volatile uint32_t s_diag_hidout_const = 0;
-static volatile uint32_t s_diag_hidout_period = 0;
-static volatile uint32_t s_diag_hidout_efop = 0;
-static volatile uint32_t s_diag_hidout_gain = 0;
-static volatile uint32_t s_diag_hidout_other = 0;
-static volatile uint32_t s_diag_hidget = 0;
-static volatile uint32_t s_diag_set_eff_torque = 0;
-static volatile int32_t  s_diag_last_torque_int32 = 0;
-static volatile uint32_t s_ffb_loop_last_us = 0;
-static volatile uint32_t s_ffb_loop_max_us = 0;
-static volatile uint32_t s_ffb_calc_max_us = 0;
-static volatile uint32_t s_ffb_lock_wait_last_us = 0;
-static volatile uint32_t s_ffb_lock_wait_max_us = 0;
-static volatile uint32_t s_ffb_lock_hold_max_us = 0;
-static volatile uint32_t s_ffb_loop_overruns = 0;
-static volatile uint32_t s_ffb_loop_samples = 0;
-static volatile uint32_t s_ffb_sample_last_us = 0;
-static volatile uint32_t s_ffb_sample_max_us = 0;
-static volatile uint32_t s_ffb_period_overruns = 0;
-static osSemaphoreId s_ffb_tick_sem = nullptr;
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "FFB diagnostics must remain lock-free in real-time contexts");
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+              "FFB torque diagnostics must remain lock-free");
+static std::atomic<uint32_t> s_diag_hidout_total{0};
+static std::atomic<uint32_t> s_diag_hidout_ctrl{0};
+static std::atomic<uint32_t> s_diag_hidout_neweff{0};
+static std::atomic<uint32_t> s_diag_hidout_seteff{0};
+static std::atomic<uint32_t> s_diag_hidout_cond{0};
+static std::atomic<uint32_t> s_diag_hidout_const{0};
+static std::atomic<uint32_t> s_diag_hidout_period{0};
+static std::atomic<uint32_t> s_diag_hidout_efop{0};
+static std::atomic<uint32_t> s_diag_hidout_gain{0};
+static std::atomic<uint32_t> s_diag_hidout_other{0};
+static std::atomic<uint32_t> s_diag_hidget{0};
+static std::atomic<uint32_t> s_diag_set_eff_torque{0};
+static std::atomic<int32_t> s_diag_last_torque_int32{0};
+static std::atomic<uint32_t> s_ffb_loop_last_us{0};
+static std::atomic<uint32_t> s_ffb_loop_max_us{0};
+static std::atomic<uint32_t> s_ffb_calc_max_us{0};
+static std::atomic<uint32_t> s_ffb_lock_wait_last_us{0};
+static std::atomic<uint32_t> s_ffb_lock_wait_max_us{0};
+static std::atomic<uint32_t> s_ffb_lock_hold_max_us{0};
+static std::atomic<uint32_t> s_ffb_loop_overruns{0};
+static std::atomic<uint32_t> s_ffb_loop_samples{0};
+static std::atomic<uint32_t> s_ffb_sample_last_us{0};
+static std::atomic<uint32_t> s_ffb_sample_max_us{0};
+static std::atomic<uint32_t> s_ffb_period_overruns{0};
+
+static void update_diag_max(std::atomic<uint32_t>& maximum, uint32_t value) {
+    uint32_t current = maximum.load(std::memory_order_relaxed);
+    while (value > current &&
+           !maximum.compare_exchange_weak(current, value,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+    }
+}
+static_assert(std::atomic<osSemaphoreId>::is_always_lock_free,
+              "FFB ISR semaphore handle must be published lock-free");
+static std::atomic<osSemaphoreId> s_ffb_tick_sem{nullptr};
 static uint8_t s_ffb_tick_divider = 0;
 
 // -------------------- ODriveLocalAxis --------------------
@@ -131,8 +147,8 @@ public:
         metrics_.torque = totalTorque;
         float t = (float)totalTorque / (float)0x7FFF * maxTorque_Nm_ * fxRatio_;
         pending_torque_ = t;
-        s_diag_set_eff_torque++;
-        s_diag_last_torque_int32 = totalTorque;
+        s_diag_set_eff_torque.fetch_add(1, std::memory_order_relaxed);
+        s_diag_last_torque_int32.store(totalTorque, std::memory_order_relaxed);
     }
 
     void calculateAxisEffects(bool ffb_on) override {
@@ -388,26 +404,30 @@ extern "C" void ffb_set_vbus_divider(int v);
 // RTOS tick phase. A binary semaphore coalesces delayed wakeups; the sample
 // reads the newest published encoder/controller snapshots.
 extern "C" void ffb_task_signal_tick_from_isr(void) {
-    if (s_ffb_tick_sem == nullptr) return;
+    osSemaphoreId tick_sem = s_ffb_tick_sem.load(std::memory_order_acquire);
+    if (tick_sem == nullptr) return;
     if (++s_ffb_tick_divider == 8) {
         s_ffb_tick_divider = 0;
-        osSemaphoreRelease(s_ffb_tick_sem);
+        osSemaphoreRelease(tick_sem);
     }
 }
 
 static void ffb_thread(void *arg) {
     (void)arg;
     const uint32_t period_ms = 1; // 1 kHz
+    osSemaphoreId tick_sem = s_ffb_tick_sem.load(std::memory_order_acquire);
+    if (tick_sem == nullptr) return;
     uint32_t previous_sample_start_us = 0;
     bool has_previous_sample = false;
     while (true) {
-        osSemaphoreWait(s_ffb_tick_sem, osWaitForever);
+        osSemaphoreWait(tick_sem, osWaitForever);
         const uint32_t loop_start_us = micros();
         if (has_previous_sample) {
             const uint32_t sample_interval_us = loop_start_us - previous_sample_start_us;
-            s_ffb_sample_last_us = sample_interval_us;
-            if (sample_interval_us > s_ffb_sample_max_us) s_ffb_sample_max_us = sample_interval_us;
-            if (sample_interval_us > period_ms * 1000) s_ffb_period_overruns++;
+            s_ffb_sample_last_us.store(sample_interval_us, std::memory_order_relaxed);
+            update_diag_max(s_ffb_sample_max_us, sample_interval_us);
+            if (sample_interval_us > period_ms * 1000)
+                s_ffb_period_overruns.fetch_add(1, std::memory_order_relaxed);
         }
         previous_sample_start_us = loop_start_us;
         has_previous_sample = true;
@@ -420,8 +440,8 @@ static void ffb_thread(void *arg) {
             EffectsStateGuard effect_output_lock(*s_effects_calc);
             const uint32_t lock_acquired_us = micros();
             const uint32_t lock_wait_us = lock_acquired_us - lock_wait_start_us;
-            s_ffb_lock_wait_last_us = lock_wait_us;
-            if (lock_wait_us > s_ffb_lock_wait_max_us) s_ffb_lock_wait_max_us = lock_wait_us;
+            s_ffb_lock_wait_last_us.store(lock_wait_us, std::memory_order_relaxed);
+            update_diag_max(s_ffb_lock_wait_max_us, lock_wait_us);
             // Axis settings are changed by the serial task and feed directly
             // into position scaling, local effects, and the torque conversion.
             // Keep each output sample on one coherent settings snapshot.
@@ -429,10 +449,10 @@ static void ffb_thread(void *arg) {
             s_effects_calc->calculateEffects(s_axes_vec);
             s_axis_raw->commitPendingTorque();
             const uint32_t lock_hold_us = micros() - lock_acquired_us;
-            if (lock_hold_us > s_ffb_lock_hold_max_us) s_ffb_lock_hold_max_us = lock_hold_us;
+            update_diag_max(s_ffb_lock_hold_max_us, lock_hold_us);
         }
         const uint32_t calc_us = micros() - loop_start_us;
-        if (calc_us > s_ffb_calc_max_us) s_ffb_calc_max_us = calc_us;
+        update_diag_max(s_ffb_calc_max_us, calc_us);
 
         // Sample bus currents/voltage at 1kHz, track extremes.
         {
@@ -450,18 +470,26 @@ static void ffb_thread(void *arg) {
         }
 
         if (tud_hid_ready()) {
-            EffectsStateGuard axis_report_lock(*s_effects_calc);
-            reportHID_t<int16_t> rpt;
-            rpt.id = 1;
-            rpt.buttons = 0;
-            rpt.X = (int16_t)s_axis_raw->getScaledAxisPos();
             // Phase 4.x — popula buttons + axes extras (RX/RY/RZ/Slider) a partir
             // dos GPIOs 1-4 configurados em modo button/axis.
             // reportHID_t é packed; atualize variáveis alinhadas e copie os
             // valores depois para evitar ponteiros potencialmente desalinhados.
             uint64_t buttons = 0;
             int16_t rx = 0, ry = 0, rz = 0, slider = 0;
+            // GPIO scanning can trigger axis.zeroenc!, which acquires the
+            // effect-state mutex itself. Scan before taking that mutex to
+            // avoid recursively locking the non-recursive MutexStandard.
             gpio_inputs_update_report(&buttons, &rx, &ry, &rz, &slider);
+
+            int16_t axis_position;
+            {
+                EffectsStateGuard axis_report_lock(*s_effects_calc);
+                axis_position = (int16_t)s_axis_raw->getScaledAxisPos();
+            }
+            reportHID_t<int16_t> rpt;
+            rpt.id = 1;
+            rpt.buttons = 0;
+            rpt.X = axis_position;
             rpt.buttons = buttons;
             rpt.RX = rx;
             rpt.RY = ry;
@@ -496,10 +524,11 @@ static void ffb_thread(void *arg) {
         }
 
         const uint32_t loop_us = micros() - loop_start_us;
-        s_ffb_loop_last_us = loop_us;
-        if (loop_us > s_ffb_loop_max_us) s_ffb_loop_max_us = loop_us;
-        if (loop_us >= period_ms * 1000) s_ffb_loop_overruns++;
-        s_ffb_loop_samples++;
+        s_ffb_loop_last_us.store(loop_us, std::memory_order_relaxed);
+        update_diag_max(s_ffb_loop_max_us, loop_us);
+        if (loop_us >= period_ms * 1000)
+            s_ffb_loop_overruns.fetch_add(1, std::memory_order_relaxed);
+        s_ffb_loop_samples.fetch_add(1, std::memory_order_relaxed);
 
     }
 }
@@ -641,10 +670,11 @@ extern "C" void ffb_task_init(void) {
     s_hidffb->registerHidCallback();
 
     osSemaphoreDef(ffbTickSem);
-    s_ffb_tick_sem = osSemaphoreCreate(osSemaphore(ffbTickSem), 1);
-    if (s_ffb_tick_sem == nullptr) return;
+    osSemaphoreId tick_sem = osSemaphoreCreate(osSemaphore(ffbTickSem), 1);
+    if (tick_sem == nullptr) return;
     // CMSIS semaphores start full; wait with zero timeout to begin empty.
-    (void)osSemaphoreWait(s_ffb_tick_sem, 0);
+    (void)osSemaphoreWait(tick_sem, 0);
+    s_ffb_tick_sem.store(tick_sem, std::memory_order_release);
 
     osThreadDef(ffbThread, ffb_thread, osPriorityAboveNormal, 0, 2048 / sizeof(StackType_t));
     osThreadCreate(osThread(ffbThread), NULL);
@@ -749,7 +779,7 @@ static void ffb_load_axis_params_internal(void) {
 // -------------------- Bridges pros callbacks TinyUSB --------------------
 extern "C" uint16_t usbhid_hidGet_bridge(uint8_t report_id, hid_report_type_t type,
                                            uint8_t *buf, uint16_t reqlen) {
-    s_diag_hidget++;
+    s_diag_hidget.fetch_add(1, std::memory_order_relaxed);
     if (UsbHidHandler::globalHidHandler) {
         return UsbHidHandler::globalHidHandler->hidGet(report_id, type, buf, reqlen);
     }
@@ -770,17 +800,17 @@ extern "C" void usbhid_hidOut_bridge(uint8_t report_id, hid_report_type_t type,
     }
 
     // Diagnóstico — incrementa contador específico por report_id
-    s_diag_hidout_total++;
+    s_diag_hidout_total.fetch_add(1, std::memory_order_relaxed);
     switch (report_id) {
-        case 1:  s_diag_hidout_seteff++;  break;  // HID_ID_EFFREP (Set Effect)
-        case 3:  s_diag_hidout_cond++;   break;  // HID_ID_CONDREP (Condition)
-        case 4:  s_diag_hidout_period++; break;  // HID_ID_PRIDREP (Periodic)
-        case 5:  s_diag_hidout_const++;  break;   // HID_ID_CONSTREP (Constant Force)
-        case 10: s_diag_hidout_efop++;   break;   // HID_ID_EFOPREP (Effect Operation)
-        case 12: s_diag_hidout_ctrl++;   break;   // HID_ID_CTRLREP (Enable/Disable Actuators)
-        case 13: s_diag_hidout_gain++;   break;   // HID_ID_GAINREP
-        case 17: s_diag_hidout_neweff++; break;   // HID_ID_NEWEFREP (Create Effect — Feature)
-        default: s_diag_hidout_other++;  break;
+        case 1:  s_diag_hidout_seteff.fetch_add(1, std::memory_order_relaxed);  break;  // HID_ID_EFFREP (Set Effect)
+        case 3:  s_diag_hidout_cond.fetch_add(1, std::memory_order_relaxed);    break;  // HID_ID_CONDREP (Condition)
+        case 4:  s_diag_hidout_period.fetch_add(1, std::memory_order_relaxed);  break;  // HID_ID_PRIDREP (Periodic)
+        case 5:  s_diag_hidout_const.fetch_add(1, std::memory_order_relaxed);   break;  // HID_ID_CONSTREP (Constant Force)
+        case 10: s_diag_hidout_efop.fetch_add(1, std::memory_order_relaxed);    break;  // HID_ID_EFOPREP (Effect Operation)
+        case 12: s_diag_hidout_ctrl.fetch_add(1, std::memory_order_relaxed);    break;  // HID_ID_CTRLREP (Enable/Disable Actuators)
+        case 13: s_diag_hidout_gain.fetch_add(1, std::memory_order_relaxed);    break;  // HID_ID_GAINREP
+        case 17: s_diag_hidout_neweff.fetch_add(1, std::memory_order_relaxed);  break;  // HID_ID_NEWEFREP (Create Effect — Feature)
+        default: s_diag_hidout_other.fetch_add(1, std::memory_order_relaxed);   break;
     }
 
     UsbHidHandler::globalHidHandler->hidOut(report_id, type, buf, size);
@@ -845,19 +875,19 @@ extern "C" int ffb_count_active_effects(void) {
 
 // Diagnósticos pro debug do pipeline FFB. Acessível via comando ASCII custom
 // 'fd' (FFB diag) que adicionamos em ascii_protocol.cpp.
-extern "C" uint32_t ffb_diag_hidout_total(void)   { return s_diag_hidout_total; }
-extern "C" uint32_t ffb_diag_hidout_ctrl(void)    { return s_diag_hidout_ctrl; }
-extern "C" uint32_t ffb_diag_hidout_neweff(void)  { return s_diag_hidout_neweff; }
-extern "C" uint32_t ffb_diag_hidout_seteff(void)  { return s_diag_hidout_seteff; }
-extern "C" uint32_t ffb_diag_hidout_cond(void)    { return s_diag_hidout_cond; }
-extern "C" uint32_t ffb_diag_hidout_const(void)   { return s_diag_hidout_const; }
-extern "C" uint32_t ffb_diag_hidout_period(void)  { return s_diag_hidout_period; }
-extern "C" uint32_t ffb_diag_hidout_efop(void)    { return s_diag_hidout_efop; }
-extern "C" uint32_t ffb_diag_hidout_gain(void)    { return s_diag_hidout_gain; }
-extern "C" uint32_t ffb_diag_hidout_other(void)   { return s_diag_hidout_other; }
-extern "C" uint32_t ffb_diag_hidget(void)         { return s_diag_hidget; }
-extern "C" uint32_t ffb_diag_set_eff_torque(void) { return s_diag_set_eff_torque; }
-extern "C" int32_t  ffb_diag_last_torque(void)    { return s_diag_last_torque_int32; }
+extern "C" uint32_t ffb_diag_hidout_total(void)   { return s_diag_hidout_total.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_ctrl(void)    { return s_diag_hidout_ctrl.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_neweff(void)  { return s_diag_hidout_neweff.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_seteff(void)  { return s_diag_hidout_seteff.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_cond(void)    { return s_diag_hidout_cond.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_const(void)   { return s_diag_hidout_const.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_period(void)  { return s_diag_hidout_period.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_efop(void)    { return s_diag_hidout_efop.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_gain(void)    { return s_diag_hidout_gain.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidout_other(void)   { return s_diag_hidout_other.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_hidget(void)         { return s_diag_hidget.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_set_eff_torque(void) { return s_diag_set_eff_torque.load(std::memory_order_relaxed); }
+extern "C" int32_t  ffb_diag_last_torque(void)    { return s_diag_last_torque_int32.load(std::memory_order_relaxed); }
 extern "C" int      ffb_diag_active_effects(void) { return ffb_count_active_effects(); }
 extern "C" float ffb_diag_pending_torque(void) {
     if (!s_axis_raw || !s_effects_calc) return 0.0f;
@@ -870,28 +900,28 @@ extern "C" int ffb_diag_ffb_active_flag(void) {
     EffectsStateGuard state_lock(*s_effects_calc);
     return s_hidffb->getFfbActive() ? 1 : 0;
 }
-extern "C" uint32_t ffb_diag_loop_last_us(void) { return s_ffb_loop_last_us; }
-extern "C" uint32_t ffb_diag_loop_max_us(void) { return s_ffb_loop_max_us; }
-extern "C" uint32_t ffb_diag_calc_max_us(void) { return s_ffb_calc_max_us; }
-extern "C" uint32_t ffb_diag_lock_wait_max_us(void) { return s_ffb_lock_wait_max_us; }
-extern "C" uint32_t ffb_diag_lock_hold_max_us(void) { return s_ffb_lock_hold_max_us; }
-extern "C" uint32_t ffb_diag_loop_overruns(void) { return s_ffb_loop_overruns; }
-extern "C" uint32_t ffb_diag_loop_samples(void) { return s_ffb_loop_samples; }
-extern "C" uint32_t ffb_diag_sample_last_us(void) { return s_ffb_sample_last_us; }
-extern "C" uint32_t ffb_diag_sample_max_us(void) { return s_ffb_sample_max_us; }
-extern "C" uint32_t ffb_diag_period_overruns(void) { return s_ffb_period_overruns; }
+extern "C" uint32_t ffb_diag_loop_last_us(void) { return s_ffb_loop_last_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_loop_max_us(void) { return s_ffb_loop_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_calc_max_us(void) { return s_ffb_calc_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_lock_wait_max_us(void) { return s_ffb_lock_wait_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_lock_hold_max_us(void) { return s_ffb_lock_hold_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_loop_overruns(void) { return s_ffb_loop_overruns.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_loop_samples(void) { return s_ffb_loop_samples.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_sample_last_us(void) { return s_ffb_sample_last_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_sample_max_us(void) { return s_ffb_sample_max_us.load(std::memory_order_relaxed); }
+extern "C" uint32_t ffb_diag_period_overruns(void) { return s_ffb_period_overruns.load(std::memory_order_relaxed); }
 extern "C" void ffb_diag_reset_perf(void) {
-    s_ffb_loop_last_us = 0;
-    s_ffb_loop_max_us = 0;
-    s_ffb_calc_max_us = 0;
-    s_ffb_lock_wait_last_us = 0;
-    s_ffb_lock_wait_max_us = 0;
-    s_ffb_lock_hold_max_us = 0;
-    s_ffb_loop_overruns = 0;
-    s_ffb_loop_samples = 0;
-    s_ffb_sample_last_us = 0;
-    s_ffb_sample_max_us = 0;
-    s_ffb_period_overruns = 0;
+    s_ffb_loop_last_us.store(0, std::memory_order_relaxed);
+    s_ffb_loop_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_calc_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_lock_wait_last_us.store(0, std::memory_order_relaxed);
+    s_ffb_lock_wait_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_lock_hold_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_loop_overruns.store(0, std::memory_order_relaxed);
+    s_ffb_loop_samples.store(0, std::memory_order_relaxed);
+    s_ffb_sample_last_us.store(0, std::memory_order_relaxed);
+    s_ffb_sample_max_us.store(0, std::memory_order_relaxed);
+    s_ffb_period_overruns.store(0, std::memory_order_relaxed);
 }
 
 // Encontra o N-ésimo effect com state != INACTIVE (n=0 → primeiro, n=1 →

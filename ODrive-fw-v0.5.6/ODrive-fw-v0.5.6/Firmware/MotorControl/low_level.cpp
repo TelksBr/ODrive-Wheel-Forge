@@ -3,6 +3,7 @@
 #include <board.h>
 
 #include <cmsis_os.h>
+#include <atomic>
 #include <cmath>
 #include <stdint.h>
 #include <stdlib.h>
@@ -35,6 +36,11 @@ float ibus_ = 0.0f; // exposed for monitoring only
 bool brake_resistor_armed = false;
 bool brake_resistor_saturated = false;
 float brake_resistor_current = 0.0f;
+static_assert(std::atomic<float>::is_always_lock_free,
+              "FFB bus telemetry snapshots must be lock-free in interrupt context");
+static std::atomic<float> s_ffb_vbus_voltage_snapshot_{12.0f};
+static std::atomic<float> s_ffb_ibus_snapshot_{0.0f};
+static std::atomic<float> s_ffb_brake_current_snapshot_{0.0f};
 osThreadId analog_thread = 0;
 /* Private constant data -----------------------------------------------------*/
 /* CPU critical section helpers ----------------------------------------------*/
@@ -321,6 +327,19 @@ extern volatile float g_vbus_voltage_scale;
 
 void vbus_sense_adc_cb(uint32_t adc_value) {
     vbus_voltage = adc_value * g_vbus_voltage_scale;
+    s_ffb_vbus_voltage_snapshot_.store(vbus_voltage, std::memory_order_relaxed);
+}
+
+extern "C" float low_level_ffb_get_vbus_snapshot(void) {
+    return s_ffb_vbus_voltage_snapshot_.load(std::memory_order_relaxed);
+}
+
+extern "C" float low_level_ffb_get_ibus_snapshot(void) {
+    return s_ffb_ibus_snapshot_.load(std::memory_order_relaxed);
+}
+
+extern "C" float low_level_ffb_get_brake_current_snapshot(void) {
+    return s_ffb_brake_current_snapshot_.load(std::memory_order_relaxed);
 }
 
 // @brief Sums up the Ibus contribution of each motor and updates the
@@ -372,6 +391,8 @@ void update_brake_current() {
 
     brake_resistor_current = brake_current;
     ibus_ += odrv.ibus_report_filter_k_ * (Ibus_sum - ibus_);
+    s_ffb_ibus_snapshot_.store(ibus_, std::memory_order_relaxed);
+    s_ffb_brake_current_snapshot_.store(brake_resistor_current, std::memory_order_relaxed);
 
     if (Ibus_sum > odrv.config_.dc_max_positive_current) {
         odrv.disarm_with_error(ODrive::ERROR_DC_BUS_OVER_CURRENT);

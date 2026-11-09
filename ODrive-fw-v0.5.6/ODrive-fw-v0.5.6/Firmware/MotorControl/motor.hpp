@@ -1,6 +1,8 @@
 #ifndef __MOTOR_HPP
 #define __MOTOR_HPP
 
+#include <atomic>
+
 class Axis; // declared in axis.hpp
 class Motor;
 
@@ -10,6 +12,12 @@ class Motor;
 
 class Motor : public ODriveIntf::MotorIntf {
 public:
+    static_assert(std::atomic<float>::is_always_lock_free,
+                  "FFB motor-current telemetry snapshot must be lock-free");
+
+    float get_ffb_i_bus_snapshot() const {
+        return ffb_i_bus_snapshot_.load(std::memory_order_relaxed);
+    }
 
     // NOTE: for gimbal motors, all units of Nm are instead V.
     // example: vel_gain is [V/(turn/s)] instead of [Nm/(turn/s)]
@@ -127,6 +135,7 @@ public:
     Iph_ABC_t DC_calib_ = {0.0f, 0.0f, 0.0f};
     float dc_calib_running_since_ = 0.0f; // current sensor calibration needs some time to settle
     float I_bus_ = 0.0f; // this motors contribution to the bus current
+    std::atomic<float> ffb_i_bus_snapshot_{0.0f}; // [A], read by FFB/HID telemetry
     float phase_current_rev_gain_ = 0.0f; // Reverse gain for ADC to Amps (to be set by DRV8301_setup)
     FieldOrientedController current_control_;
     float effective_current_lim_ = 10.0f; // [A]

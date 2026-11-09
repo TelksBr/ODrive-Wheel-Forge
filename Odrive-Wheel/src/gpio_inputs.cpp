@@ -6,6 +6,7 @@
 #include "eeprom_addresses.h"
 #include "flash_helpers.h"
 #include "stm32f4xx_hal.h"
+#include "cmsis_os.h"
 
 // Não dá pra incluir low_level.h direto: ele declara funções com Stm32Gpio
 // (classe C++) e arrasta dependências de drivers. Só preciso de uma função
@@ -25,6 +26,7 @@ extern "C" {
 #include "eeprom.h"
 }
 
+#include <atomic>
 #include <string.h>
 
 // -------------------- Pinout (hardcoded pra MKS XDrive Mini / ODrive v3.6) --------------------
@@ -69,6 +71,24 @@ struct gpio_cfg_t {
 };
 
 static gpio_cfg_t s_cfg[GPIO_INPUTS_COUNT];
+static_assert(std::atomic<osMutexId>::is_always_lock_free,
+              "GPIO config mutex handle must be published lock-free");
+static std::atomic<osMutexId> s_gpio_cfg_mutex{nullptr};
+
+class GpioConfigGuard {
+public:
+    explicit GpioConfigGuard(const std::atomic<osMutexId>& mutex)
+        : mutex_(mutex.load(std::memory_order_acquire)),
+          locked_(mutex_ != nullptr && osMutexWait(mutex_, osWaitForever) == osOK) {}
+    ~GpioConfigGuard() {
+        if (locked_) osMutexRelease(mutex_);
+    }
+    explicit operator bool() const { return locked_; }
+
+private:
+    osMutexId mutex_;
+    bool locked_;
+};
 
 // Cache do último valor filtrado por GPIO (modo AXIS). Atualizado no update
 // loop quando o axis processor processa. Usado por gpio.N.filt? pra UI.
@@ -128,6 +148,19 @@ static void apply_pin_mode(int idx0) {
 
 // -------------------- Init --------------------
 extern "C" void gpio_inputs_init(void) {
+    osMutexDef(gpioCfgMutex);
+    osMutexId mutex = s_gpio_cfg_mutex.load(std::memory_order_acquire);
+    if (mutex == nullptr) {
+        mutex = osMutexCreate(osMutex(gpioCfgMutex));
+        if (mutex != nullptr) {
+            s_gpio_cfg_mutex.store(mutex, std::memory_order_release);
+        }
+    }
+    configASSERT(mutex != nullptr);
+    if (mutex == nullptr) return;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return;
+
     // Defaults: tudo disabled, calibração razoável (0.16V .. 3.07V)
     for (int i = 0; i < GPIO_INPUTS_COUNT; i++) {
         s_cfg[i].mode = GPIO_INPUT_DISABLED;
@@ -166,14 +199,21 @@ extern "C" void gpio_inputs_init(void) {
 
 // -------------------- Save --------------------
 extern "C" int gpio_inputs_save(int *writes_out, int *errors_out) {
+    gpio_cfg_t config_snapshot[GPIO_INPUTS_COUNT];
+    {
+        GpioConfigGuard guard(s_gpio_cfg_mutex);
+        if (!guard) return 0;
+        memcpy(config_snapshot, s_cfg, sizeof(config_snapshot));
+    }
+
     int writes = 0, errors = 0;
     for (int i = 0; i < GPIO_INPUTS_COUNT; i++) {
         if (!Flash_Write(s_addr_cfg[i],
-                          pack_cfg(s_cfg[i].mode, s_cfg[i].idx, s_cfg[i].invert))) errors++;
+                          pack_cfg(config_snapshot[i].mode, config_snapshot[i].idx, config_snapshot[i].invert))) errors++;
         writes++;
-        if (!Flash_Write(s_addr_amin[i], s_cfg[i].amin)) errors++;
+        if (!Flash_Write(s_addr_amin[i], config_snapshot[i].amin)) errors++;
         writes++;
-        if (!Flash_Write(s_addr_amax[i], s_cfg[i].amax)) errors++;
+        if (!Flash_Write(s_addr_amax[i], config_snapshot[i].amax)) errors++;
         writes++;
     }
     if (writes_out) *writes_out = writes;
@@ -203,6 +243,8 @@ extern "C" void gpio_inputs_update_report(uint64_t *buttons,
                                            int16_t *RX, int16_t *RY,
                                            int16_t *RZ, int16_t *Slider) {
     if (!buttons) return;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return;
 
     // Edge detection per-GPIO pra modo ZEROWHEEL.
     // Inicializa true = "estava solto" → primeira leitura como pressed dispara.
@@ -286,7 +328,9 @@ static inline int idx0_from_inst(uint8_t inst) {
 
 extern "C" uint8_t gpio_inputs_get_mode(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0 : s_cfg[i].mode;
+    if (i < 0) return 0;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_cfg[i].mode : 0;
 }
 extern "C" int gpio_inputs_set_mode(uint8_t inst, uint8_t mode) {
     int i = idx0_from_inst(inst);
@@ -294,6 +338,8 @@ extern "C" int gpio_inputs_set_mode(uint8_t inst, uint8_t mode) {
     // Bloqueia mode=AXIS em pinos sem ADC (ex: GPIO 6 = PB2).
     // ZEROWHEEL é digital → funciona em qualquer GPIO (com ou sem ADC).
     if (mode == GPIO_INPUT_AXIS && s_pins[i].adc_channel == GPIO_NO_ADC) return -1;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return -1;
     if (s_cfg[i].mode != mode) {
         s_cfg[i].mode = mode;
         apply_pin_mode(i);
@@ -303,44 +349,60 @@ extern "C" int gpio_inputs_set_mode(uint8_t inst, uint8_t mode) {
 
 extern "C" uint8_t gpio_inputs_get_idx(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0 : s_cfg[i].idx;
+    if (i < 0) return 0;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_cfg[i].idx : 0;
 }
 extern "C" int gpio_inputs_set_idx(uint8_t inst, uint8_t idx) {
     int i = idx0_from_inst(inst);
     if (i < 0 || idx > 63) return -1;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return -1;
     s_cfg[i].idx = idx;
     return 0;
 }
 
 extern "C" uint8_t gpio_inputs_get_invert(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0 : s_cfg[i].invert;
+    if (i < 0) return 0;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_cfg[i].invert : 0;
 }
 extern "C" int gpio_inputs_set_invert(uint8_t inst, uint8_t inv) {
     int i = idx0_from_inst(inst);
     if (i < 0) return -1;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return -1;
     s_cfg[i].invert = inv ? 1 : 0;
     return 0;
 }
 
 extern "C" uint16_t gpio_inputs_get_amin(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0 : s_cfg[i].amin;
+    if (i < 0) return 0;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_cfg[i].amin : 0;
 }
 extern "C" int gpio_inputs_set_amin(uint8_t inst, uint16_t v) {
     int i = idx0_from_inst(inst);
     if (i < 0 || v > 4095) return -1;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return -1;
     s_cfg[i].amin = v;
     return 0;
 }
 
 extern "C" uint16_t gpio_inputs_get_amax(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0 : s_cfg[i].amax;
+    if (i < 0) return 0;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_cfg[i].amax : 0;
 }
 extern "C" int gpio_inputs_set_amax(uint8_t inst, uint16_t v) {
     int i = idx0_from_inst(inst);
     if (i < 0 || v > 4095) return -1;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    if (!guard) return -1;
     s_cfg[i].amax = v;
     return 0;
 }
@@ -350,16 +412,24 @@ extern "C" int gpio_inputs_set_amax(uint8_t inst, uint16_t v) {
 // 0xFFFF se GPIO não está em modo AXIS ou nunca foi processado.
 extern "C" uint16_t gpio_inputs_get_filt(uint8_t inst) {
     int i = idx0_from_inst(inst);
-    return (i < 0) ? 0xFFFF : s_last_filtered[i];
+    if (i < 0) return 0xFFFF;
+    GpioConfigGuard guard(s_gpio_cfg_mutex);
+    return guard ? s_last_filtered[i] : 0xFFFF;
 }
 
 extern "C" uint16_t gpio_inputs_read_raw(uint8_t inst) {
     int i = idx0_from_inst(inst);
     if (i < 0) return 0xFFFF;
-    if (s_cfg[i].mode == GPIO_INPUT_BUTTON || s_cfg[i].mode == GPIO_INPUT_ZEROWHEEL) {
+    uint8_t mode;
+    {
+        GpioConfigGuard guard(s_gpio_cfg_mutex);
+        if (!guard) return 0xFFFF;
+        mode = s_cfg[i].mode;
+    }
+    if (mode == GPIO_INPUT_BUTTON || mode == GPIO_INPUT_ZEROWHEEL) {
         // Mesma leitura digital: 1 = pressionado (pino em GND), 0 = solto (pull-up high)
         return HAL_GPIO_ReadPin(s_pins[i].port, s_pins[i].pin) == GPIO_PIN_RESET ? 1 : 0;
-    } else if (s_cfg[i].mode == GPIO_INPUT_AXIS) {
+    } else if (mode == GPIO_INPUT_AXIS) {
         if (s_pins[i].adc_channel == GPIO_NO_ADC) return 0xFFFF;
         float rel = get_adc_relative_voltage_ch(s_pins[i].adc_channel);
         if (rel < 0) rel = 0;

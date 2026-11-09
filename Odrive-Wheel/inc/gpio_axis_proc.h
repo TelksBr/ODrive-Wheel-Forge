@@ -26,6 +26,7 @@
 #ifdef __cplusplus
 
 #include "Filters.h"
+#include "mutex.hpp"
 
 #define AXIS_PROC_CHANNELS 4
 
@@ -41,13 +42,13 @@ public:
     uint16_t filterRaw(uint8_t ch, uint16_t raw);
 
     // Estado
-    bool isFilterEnabled() const { return filter_enabled_; }
+    bool isFilterEnabled() const;
     void setFilterEnabled(bool en);
 
-    bool isAutorangeEnabled() const { return autorange_enabled_; }
-    void setAutorangeEnabled(bool en) { autorange_enabled_ = en; }
+    bool isAutorangeEnabled() const;
+    void setAutorangeEnabled(bool en);
 
-    float getFilterFreq() const { return filter_freq_hz_; }
+    float getFilterFreq() const;
     void  setFilterFreq(float hz);
 
 private:
@@ -57,6 +58,7 @@ private:
     bool  filter_enabled_;
     bool  autorange_enabled_;
     float filter_freq_hz_;
+    mutable cpp_freertos::MutexStandard state_mutex_;
     static constexpr float SAMPLE_RATE_HZ = 1000.0f;
     static constexpr float DEFAULT_FREQ_HZ = 60.0f;
     static constexpr float FILTER_Q = 0.5f;

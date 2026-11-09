@@ -5,6 +5,10 @@
 #include "odrive_bridge.h"
 #include "odrive_main.h"
 
+extern "C" float low_level_ffb_get_vbus_snapshot(void);
+extern "C" float low_level_ffb_get_ibus_snapshot(void);
+extern "C" float low_level_ffb_get_brake_current_snapshot(void);
+
 extern "C" void odrive_bridge_init(void) {
     // v0.5.6 stock: motor.setup() + axis.start_thread() já correm pelo
     // odrive_main() normal. TIM3 encoder quadrature está ativo. Nada a fazer.
@@ -81,9 +85,9 @@ extern "C" void odrive_bridge_set_input_torque(float nm) {
 // Bus current/voltage readouts — usados pelo peak tracker do ffb_task.
 // Centralizados aqui pra não precisar incluir odrive_main.h em outros .cpp
 // (colide com class Axis do OpenFFBoard).
-extern "C" float odrive_bridge_get_ibus(void)        { return odrv.ibus_; }
-extern "C" float odrive_bridge_get_vbus(void)        { return odrv.vbus_voltage_; }
-extern "C" float odrive_bridge_get_motor_ibus(void)  { return axes[0].motor_.I_bus_; }
+extern "C" float odrive_bridge_get_ibus(void)        { return low_level_ffb_get_ibus_snapshot(); }
+extern "C" float odrive_bridge_get_vbus(void)        { return low_level_ffb_get_vbus_snapshot(); }
+extern "C" float odrive_bridge_get_motor_ibus(void)  { return axes[0].motor_.get_ffb_i_bus_snapshot(); }
 extern "C" int   odrive_bridge_motor_is_armed(void)  { return axes[0].motor_.is_armed_ ? 1 : 0; }
 
 // Telemetria 1 kHz pro HID input report (axes não usados Y, Z, Dial).
@@ -96,13 +100,13 @@ extern "C" float odrive_bridge_get_vel_estimate(void) {
     return axes[0].encoder_.get_ffb_vel_estimate_snapshot();
 }
 extern "C" float odrive_bridge_get_iq_measured(void) {
-    return axes[0].motor_.current_control_.Iq_measured_;
+    return axes[0].motor_.current_control_.get_ffb_iq_measured_snapshot();
 }
 extern "C" float odrive_bridge_get_torque_output(void) {
     return axes[0].controller_.get_ffb_torque_output_snapshot();
 }
 extern "C" float odrive_bridge_get_brake_resistor_current(void) {
-    return odrv.brake_resistor_current_;
+    return low_level_ffb_get_brake_current_snapshot();
 }
 
 extern "C" float odrive_bridge_get_fet_temp(void) {

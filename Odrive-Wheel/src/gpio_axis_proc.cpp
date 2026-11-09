@@ -8,6 +8,22 @@
 
 #include "gpio_axis_proc.h"
 
+namespace {
+class AxisProcGuard {
+public:
+    explicit AxisProcGuard(cpp_freertos::MutexStandard& mutex)
+        : mutex_(mutex), locked_(mutex_.Lock()) {}
+    ~AxisProcGuard() {
+        if (locked_) mutex_.Unlock();
+    }
+    explicit operator bool() const { return locked_; }
+
+private:
+    cpp_freertos::MutexStandard& mutex_;
+    bool locked_;
+};
+}
+
 // ===== Singleton =====
 GpioAxisProcessor& GpioAxisProcessor::instance() {
     static GpioAxisProcessor inst;
@@ -22,6 +38,8 @@ GpioAxisProcessor::GpioAxisProcessor()
 }
 
 void GpioAxisProcessor::init() {
+    AxisProcGuard state_lock(state_mutex_);
+    if (!state_lock) return;
     setupFilters();
 }
 
@@ -37,6 +55,8 @@ void GpioAxisProcessor::setupFilters() {
 // Recebe raw ADC (0..4095), retorna raw filtrado (0..4095). Se filter
 // desabilitado, retorna raw inalterado. Clamp pra range do ADC.
 uint16_t GpioAxisProcessor::filterRaw(uint8_t ch, uint16_t raw) {
+    AxisProcGuard state_lock(state_mutex_);
+    if (!state_lock) return raw;
     if (ch >= AXIS_PROC_CHANNELS) return raw;
     if (!filter_enabled_) return raw;
 
@@ -46,7 +66,14 @@ uint16_t GpioAxisProcessor::filterRaw(uint8_t ch, uint16_t raw) {
     return (uint16_t)v;
 }
 
+bool GpioAxisProcessor::isFilterEnabled() const {
+    AxisProcGuard state_lock(state_mutex_);
+    return state_lock ? filter_enabled_ : false;
+}
+
 void GpioAxisProcessor::setFilterEnabled(bool en) {
+    AxisProcGuard state_lock(state_mutex_);
+    if (!state_lock) return;
     filter_enabled_ = en;
     if (en) {
         // Re-setup limpa o estado interno (z1/z2) dos Biquads
@@ -54,7 +81,25 @@ void GpioAxisProcessor::setFilterEnabled(bool en) {
     }
 }
 
+bool GpioAxisProcessor::isAutorangeEnabled() const {
+    AxisProcGuard state_lock(state_mutex_);
+    return state_lock ? autorange_enabled_ : false;
+}
+
+void GpioAxisProcessor::setAutorangeEnabled(bool en) {
+    AxisProcGuard state_lock(state_mutex_);
+    if (!state_lock) return;
+    autorange_enabled_ = en;
+}
+
+float GpioAxisProcessor::getFilterFreq() const {
+    AxisProcGuard state_lock(state_mutex_);
+    return state_lock ? filter_freq_hz_ : DEFAULT_FREQ_HZ;
+}
+
 void GpioAxisProcessor::setFilterFreq(float hz) {
+    AxisProcGuard state_lock(state_mutex_);
+    if (!state_lock) return;
     if (hz < 0.5f)   hz = 0.5f;
     if (hz > 500.0f) hz = 500.0f;
     filter_freq_hz_ = hz;
