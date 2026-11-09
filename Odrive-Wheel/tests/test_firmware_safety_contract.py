@@ -158,6 +158,37 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("s_diag_last_torque_int32.load(std::memory_order_relaxed)", self.ffb_task)
         self.assertNotRegex(self.ffb_task, r"volatile\s+(?:uint32_t|int32_t)\s+s_(?:diag|ffb)_")
 
+    def test_ffb_bus_peaks_are_atomic_across_sampling_and_diagnostic_reset(self):
+        peaks = (
+            "s_ibus_max", "s_ibus_min", "s_motor_ibus_max",
+            "s_motor_ibus_min", "s_vbus_max", "s_vbus_min",
+        )
+        self.assertIn("std::atomic<float>::is_always_lock_free", self.ffb_task)
+        self.assertIn("update_diag_max_float", self.ffb_task)
+        self.assertIn("update_diag_min_float", self.ffb_task)
+        for peak in peaks:
+            self.assertRegex(self.ffb_task, rf"std::atomic<float>\s+{peak}")
+            self.assertNotRegex(self.ffb_task, rf"volatile\s+float\s+{peak}")
+            self.assertRegex(self.ffb_task, rf"{peak}\.load\(std::memory_order_relaxed\)")
+            self.assertRegex(self.ffb_task, rf"{peak}\.store\([^\n]*std::memory_order_relaxed\)")
+
+    def test_vbus_scale_is_published_atomically_between_configuration_and_adc_isr(self):
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        low_level = (odrive_root / "MotorControl" / "low_level.cpp").read_text(encoding="utf-8")
+        self.assertTrue(
+            "std::atomic<float> g_vbus_voltage_scale" in self.ffb_task,
+            "VBUS scale shared with ADC ISR must be atomic",
+        )
+        self.assertTrue(
+            "extern std::atomic<float> g_vbus_voltage_scale" in low_level,
+            "ADC ISR must observe the atomic VBUS scale declaration",
+        )
+        adc_callback = function_body(low_level, "void vbus_sense_adc_cb(uint32_t adc_value)")
+        self.assertIn("g_vbus_voltage_scale.load(std::memory_order_relaxed)", adc_callback)
+        setter = function_body(self.ffb_task, 'extern "C" void ffb_set_vbus_divider(int v) {')
+        self.assertIn("g_vbus_voltage_scale.store(", setter)
+        self.assertNotIn("volatile float g_vbus_voltage_scale", self.ffb_task)
+
     def test_encoder_position_and_velocity_are_published_as_atomic_ffb_snapshots(self):
         odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
         encoder_header = (odrive_root / "MotorControl" / "encoder.hpp").read_text(encoding="utf-8")

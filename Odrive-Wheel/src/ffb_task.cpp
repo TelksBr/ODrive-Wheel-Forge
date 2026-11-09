@@ -39,6 +39,8 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free,
               "FFB diagnostics must remain lock-free in real-time contexts");
 static_assert(std::atomic<int32_t>::is_always_lock_free,
               "FFB torque diagnostics must remain lock-free");
+static_assert(std::atomic<float>::is_always_lock_free,
+              "FFB floating-point diagnostics must remain lock-free");
 static std::atomic<uint32_t> s_diag_hidout_total{0};
 static std::atomic<uint32_t> s_diag_hidout_ctrl{0};
 static std::atomic<uint32_t> s_diag_hidout_neweff{0};
@@ -72,6 +74,25 @@ static void update_diag_max(std::atomic<uint32_t>& maximum, uint32_t value) {
                                           std::memory_order_relaxed)) {
     }
 }
+
+static void update_diag_max_float(std::atomic<float>& maximum, float value) {
+    float current = maximum.load(std::memory_order_relaxed);
+    while (value > current &&
+           !maximum.compare_exchange_weak(current, value,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+    }
+}
+
+static void update_diag_min_float(std::atomic<float>& minimum, float value) {
+    float current = minimum.load(std::memory_order_relaxed);
+    while (value < current &&
+           !minimum.compare_exchange_weak(current, value,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+    }
+}
+
 static_assert(std::atomic<osSemaphoreId>::is_always_lock_free,
               "FFB ISR semaphore handle must be published lock-free");
 static std::atomic<osSemaphoreId> s_ffb_tick_sem{nullptr};
@@ -379,12 +400,12 @@ static std::vector<std::unique_ptr<Axis>> s_axes_vec;
 // Amostra odrv.ibus a 1kHz e armazena pico positivo (consumo da fonte) e
 // negativo (regen voltando pra fonte). Reseta via ffb_diag_reset_ibus_peaks().
 // As leituras vão via odrive_bridge porque odrive_main.h colide com Axis.h.
-static volatile float s_ibus_max =  0.0f;   // pico de consumo (A)
-static volatile float s_ibus_min =  0.0f;   // pico de regen (A negativo)
-static volatile float s_motor_ibus_max = 0.0f;
-static volatile float s_motor_ibus_min = 0.0f;
-static volatile float s_vbus_max = 0.0f;
-static volatile float s_vbus_min = 100.0f;  // valor inicial alto pra capturar mínimo
+static std::atomic<float> s_ibus_max{0.0f};   // pico de consumo (A)
+static std::atomic<float> s_ibus_min{0.0f};   // pico de regen (A negativo)
+static std::atomic<float> s_motor_ibus_max{0.0f};
+static std::atomic<float> s_motor_ibus_min{0.0f};
+static std::atomic<float> s_vbus_max{0.0f};
+static std::atomic<float> s_vbus_min{100.0f};  // valor inicial alto pra capturar mínimo
 
 // Phase 4.x — divisor de tensão VBUS configurável.
 // Variável GLOBAL (sem static) referenciada em low_level.cpp::vbus_sense_adc_cb.
@@ -394,7 +415,7 @@ static volatile float s_vbus_min = 100.0f;  // valor inicial alto pra capturar m
 // Math: voltage_scale = adc_ref_voltage * divider / adc_full_scale
 //   adc_ref_voltage = 3.3V, adc_full_scale = 4096 → scale = 3.3 * D / 4096
 //   Pra D=19: scale ≈ 0.01531 V/count → ADC=1568 → vbus = 24.0V ✓
-volatile float g_vbus_voltage_scale = 3.3f * 19.0f / 4096.0f;
+std::atomic<float> g_vbus_voltage_scale{3.3f * 19.0f / 4096.0f};
 static uint8_t  s_vbus_divider = 19;
 // Forward declaration — definição completa lá embaixo junto com outros wrappers.
 extern "C" void ffb_set_vbus_divider(int v);
@@ -457,16 +478,16 @@ static void ffb_thread(void *arg) {
         // Sample bus currents/voltage at 1kHz, track extremes.
         {
             float ibus = odrive_bridge_get_ibus();
-            if (ibus > s_ibus_max) s_ibus_max = ibus;
-            if (ibus < s_ibus_min) s_ibus_min = ibus;
+            update_diag_max_float(s_ibus_max, ibus);
+            update_diag_min_float(s_ibus_min, ibus);
             if (odrive_bridge_motor_is_armed()) {
                 float mi = odrive_bridge_get_motor_ibus();
-                if (mi > s_motor_ibus_max) s_motor_ibus_max = mi;
-                if (mi < s_motor_ibus_min) s_motor_ibus_min = mi;
+                update_diag_max_float(s_motor_ibus_max, mi);
+                update_diag_min_float(s_motor_ibus_min, mi);
             }
             float vbus = odrive_bridge_get_vbus();
-            if (vbus > s_vbus_max) s_vbus_max = vbus;
-            if (vbus < s_vbus_min) s_vbus_min = vbus;
+            update_diag_max_float(s_vbus_max, vbus);
+            update_diag_min_float(s_vbus_min, vbus);
         }
 
         if (tud_hid_ready()) {
@@ -1141,16 +1162,19 @@ FFB_FILTER_ACCESSORS(inertia)
 
 // Bus current/voltage peaks — amostrado em 1kHz pelo ffb_thread acima.
 // Sinal de ibus: positivo = consumo, negativo = regen voltando pra fonte.
-extern "C" float ffb_diag_ibus_max(void)       { return s_ibus_max; }
-extern "C" float ffb_diag_ibus_min(void)       { return s_ibus_min; }
-extern "C" float ffb_diag_motor_ibus_max(void) { return s_motor_ibus_max; }
-extern "C" float ffb_diag_motor_ibus_min(void) { return s_motor_ibus_min; }
-extern "C" float ffb_diag_vbus_max(void)       { return s_vbus_max; }
-extern "C" float ffb_diag_vbus_min(void)       { return s_vbus_min; }
+extern "C" float ffb_diag_ibus_max(void)       { return s_ibus_max.load(std::memory_order_relaxed); }
+extern "C" float ffb_diag_ibus_min(void)       { return s_ibus_min.load(std::memory_order_relaxed); }
+extern "C" float ffb_diag_motor_ibus_max(void) { return s_motor_ibus_max.load(std::memory_order_relaxed); }
+extern "C" float ffb_diag_motor_ibus_min(void) { return s_motor_ibus_min.load(std::memory_order_relaxed); }
+extern "C" float ffb_diag_vbus_max(void)       { return s_vbus_max.load(std::memory_order_relaxed); }
+extern "C" float ffb_diag_vbus_min(void)       { return s_vbus_min.load(std::memory_order_relaxed); }
 extern "C" void  ffb_diag_reset_ibus_peaks(void) {
-    s_ibus_max = 0.0f; s_ibus_min = 0.0f;
-    s_motor_ibus_max = 0.0f; s_motor_ibus_min = 0.0f;
-    s_vbus_max = 0.0f; s_vbus_min = 100.0f;
+    s_ibus_max.store(0.0f, std::memory_order_relaxed);
+    s_ibus_min.store(0.0f, std::memory_order_relaxed);
+    s_motor_ibus_max.store(0.0f, std::memory_order_relaxed);
+    s_motor_ibus_min.store(0.0f, std::memory_order_relaxed);
+    s_vbus_max.store(0.0f, std::memory_order_relaxed);
+    s_vbus_min.store(100.0f, std::memory_order_relaxed);
 }
 
 // Fase 7 — persiste os settings de FFB (filtros, gains) na EEPROM emulada.
@@ -1442,7 +1466,10 @@ extern "C" void ffb_set_vbus_divider(int v) {
     if (v < 1)  v = 1;
     if (v > 50) v = 50;
     s_vbus_divider = (uint8_t)v;
-    g_vbus_voltage_scale = 3.3f * (float)s_vbus_divider / 4096.0f;
+    g_vbus_voltage_scale.store(
+        3.3f * (float)s_vbus_divider / 4096.0f,
+        std::memory_order_relaxed
+    );
 }
 
 extern "C" float ffb_get_axis_range(void) {

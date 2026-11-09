@@ -323,10 +323,10 @@ float get_adc_relative_voltage_ch(uint16_t channel) {
 // 19.0 (MKS XDrive Mini). Pode ser ajustada em runtime via sys.vbusdiv=N e
 // persistida em EE pra placas com divisor diferente (ODrive v3.6 oficial = 11,
 // outros clones podem variar). Cache pré-calculado pra IRQ não fazer divisão.
-extern volatile float g_vbus_voltage_scale;
+extern std::atomic<float> g_vbus_voltage_scale;
 
 void vbus_sense_adc_cb(uint32_t adc_value) {
-    vbus_voltage = adc_value * g_vbus_voltage_scale;
+    vbus_voltage = adc_value * g_vbus_voltage_scale.load(std::memory_order_relaxed);
     s_ffb_vbus_voltage_snapshot_.store(vbus_voltage, std::memory_order_relaxed);
 }
 
