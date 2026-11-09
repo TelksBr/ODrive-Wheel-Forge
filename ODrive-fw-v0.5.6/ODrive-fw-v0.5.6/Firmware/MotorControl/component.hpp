@@ -44,12 +44,12 @@ public:
      * present() and previous() cannot be used to fetch the
      * initialization value.
      */
-    OutputPort(T val) : content_(val) {}
+    OutputPort(const T& val) : content_(val) {}
     
     /**
      * @brief Updates the underlying value of this output port.
      */
-    void operator=(T value) {
+    void operator=(const T& value) {
         content_ = value;
         age_ = 0;
     }

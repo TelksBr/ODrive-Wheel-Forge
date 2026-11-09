@@ -3,8 +3,19 @@
 #include <board.h>
 
 void OpenLoopController::update(uint32_t timestamp) {
-    auto [prev_Id, prev_Iq] = Idq_setpoint_.previous().value_or(float2D{0.0f, 0.0f});
-    auto [prev_Vd, prev_Vq] = Vdq_setpoint_.previous().value_or(float2D{0.0f, 0.0f});
+    float2D previous_idq{0.0f, 0.0f};
+    const auto previous_idq_value = Idq_setpoint_.previous();
+    if (previous_idq_value.has_value()) {
+        previous_idq = *previous_idq_value;
+    }
+    auto [prev_Id, prev_Iq] = previous_idq;
+
+    float2D previous_vdq{0.0f, 0.0f};
+    const auto previous_vdq_value = Vdq_setpoint_.previous();
+    if (previous_vdq_value.has_value()) {
+        previous_vdq = *previous_vdq_value;
+    }
+    auto [prev_Vd, prev_Vq] = previous_vdq;
     float phase = phase_.previous().value_or(initial_phase_);
     float phase_vel = phase_vel_.previous().value_or(0.0f);
 

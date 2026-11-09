@@ -1,8 +1,12 @@
 #ifndef __CONTROLLER_HPP
 #define __CONTROLLER_HPP
 
+#include <atomic>
+
 class Controller : public ODriveIntf::ControllerIntf {
 public:
+    static_assert(std::atomic<float>::is_always_lock_free,
+                  "FFB torque input must be lock-free in the motor control loop");
     struct Anticogging_t {
         uint32_t index = 0;
         float cogging_map[3600];
@@ -74,6 +78,18 @@ public:
     constexpr void input_pos_updated() {
         input_pos_updated_ = true;
     }
+    void set_input_torque(float value) {
+        input_torque_.store(value, std::memory_order_relaxed);
+    }
+    float get_input_torque() const {
+        return input_torque_.load(std::memory_order_relaxed);
+    }
+    void set_ffb_torque_output_snapshot(float value) {
+        ffb_torque_output_snapshot_.store(value, std::memory_order_relaxed);
+    }
+    float get_ffb_torque_output_snapshot() const {
+        return ffb_torque_output_snapshot_.load(std::memory_order_relaxed);
+    }
     bool control_mode_updated();
     void set_input_pos_and_steps(float pos);
 
@@ -115,7 +131,6 @@ public:
 
     float input_pos_ = 0.0f;     // [turns]
     float input_vel_ = 0.0f;     // [turn/s]
-    float input_torque_ = 0.0f;  // [Nm]
     float input_filter_kp_ = 0.0f;
     float input_filter_ki_ = 0.0f;
 
@@ -135,6 +150,10 @@ public:
 
     // custom setters
     void set_input_pos(float value) { set_input_pos_and_steps(value); input_pos_updated(); }
+
+private:
+    std::atomic<float> input_torque_{0.0f}; // [Nm], published across tasks/interrupts
+    std::atomic<float> ffb_torque_output_snapshot_{0.0f}; // [Nm], read by HID telemetry
 };
 
 #endif // __CONTROLLER_HPP

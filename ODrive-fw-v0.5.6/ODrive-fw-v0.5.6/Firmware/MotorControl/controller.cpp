@@ -92,7 +92,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         config_.control_mode = CONTROL_MODE_POSITION_CONTROL;
         input_pos_ = config_.anticogging.index * axis_->encoder_.getCoggingRatio();
         input_vel_ = 0.0f;
-        input_torque_ = 0.0f;
+        set_input_torque(0.0f);
         input_pos_updated();
         return false;
     } else {
@@ -100,7 +100,7 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
         config_.control_mode = CONTROL_MODE_POSITION_CONTROL;
         input_pos_ = 0.0f;  // Send the motor home
         input_vel_ = 0.0f;
-        input_torque_ = 0.0f;
+        set_input_torque(0.0f);
         input_pos_updated();
         anticogging_valid_ = true;
         config_.anticogging.calib_anticogging = false;
@@ -209,7 +209,7 @@ bool Controller::update() {
         case INPUT_MODE_PASSTHROUGH: {
             pos_setpoint_ = input_pos_;
             vel_setpoint_ = input_vel_;
-            torque_setpoint_ = input_torque_; 
+            torque_setpoint_ = get_input_torque();
         } break;
         case INPUT_MODE_VEL_RAMP: {
             float max_step_size = std::abs(current_meas_period * config_.vel_ramp_rate);
@@ -221,7 +221,7 @@ bool Controller::update() {
         } break;
         case INPUT_MODE_TORQUE_RAMP: {
             float max_step_size = std::abs(current_meas_period * config_.torque_ramp_rate);
-            float full_step = input_torque_ - torque_setpoint_;
+            float full_step = get_input_torque() - torque_setpoint_;
             float step = std::clamp(full_step, -max_step_size, max_step_size);
 
             torque_setpoint_ += step;
@@ -295,7 +295,7 @@ bool Controller::update() {
             float s = our_arm_sin_f32(autotuning_phase_);
             pos_setpoint_ = input_pos_ + autotuning_.pos_amplitude * s; // + pos_amp_c * c
             vel_setpoint_ = input_vel_ + autotuning_.vel_amplitude * c;
-            torque_setpoint_ = input_torque_ + autotuning_.torque_amplitude * -s;
+            torque_setpoint_ = get_input_torque() + autotuning_.torque_amplitude * -s;
         } break;
         default: {
             set_error(ERROR_INVALID_INPUT_MODE);
@@ -463,6 +463,7 @@ bool Controller::update() {
     }
 
     torque_output_ = torque;
+    set_ffb_torque_output_snapshot(torque);
 
     // TODO: this is inconsistent with the other errors which are sticky.
     // However if we make ERROR_INVALID_ESTIMATE sticky then it will be

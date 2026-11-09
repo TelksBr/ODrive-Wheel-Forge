@@ -804,17 +804,17 @@ interfaces:
       current_control:
         c_is_class: True
         attributes:
-          p_gain: {type: readonly float32, c_getter: 'pi_gains_.value_or(float2D{0.0f, 0.0f}).first'}
-          i_gain: {type: readonly float32, c_getter: 'pi_gains_.value_or(float2D{0.0f, 0.0f}).second'}
+          p_gain: {type: readonly float32, c_getter: 'p_gain_for_interface()'}
+          i_gain: {type: readonly float32, c_getter: 'i_gain_for_interface()'}
           I_measured_report_filter_k: float32
-          Id_setpoint: {type: readonly float32, c_getter: 'Idq_setpoint_.value_or(float2D{0.0f, 0.0f}).first'}
-          Iq_setpoint: {type: readonly float32, c_getter: 'Idq_setpoint_.value_or(float2D{0.0f, 0.0f}).second'}
-          Vd_setpoint: {type: readonly float32, c_getter: 'Vdq_setpoint_.value_or(float2D{0.0f, 0.0f}).first'}
-          Vq_setpoint: {type: readonly float32, c_getter: 'Vdq_setpoint_.value_or(float2D{0.0f, 0.0f}).second'}
+          Id_setpoint: {type: readonly float32, c_getter: 'id_setpoint_for_interface()'}
+          Iq_setpoint: {type: readonly float32, c_getter: 'iq_setpoint_for_interface()'}
+          Vd_setpoint: {type: readonly float32, c_getter: 'vd_setpoint_for_interface()'}
+          Vq_setpoint: {type: readonly float32, c_getter: 'vq_setpoint_for_interface()'}
           phase: {type: readonly float32, c_getter: 'phase_.value_or(0.0f)'}
           phase_vel: {type: readonly float32, c_getter: 'phase_vel_.value_or(0.0f)'}
-          Ialpha_measured: {type: readonly float32, c_getter: 'Ialpha_beta_measured_.value_or(float2D{0.0f, 0.0f}).first'}
-          Ibeta_measured: {type: readonly float32, c_getter: 'Ialpha_beta_measured_.value_or(float2D{0.0f, 0.0f}).second'}
+          Ialpha_measured: {type: readonly float32, c_getter: 'ialpha_measured_for_interface()'}
+          Ibeta_measured: {type: readonly float32, c_getter: 'ibeta_measured_for_interface()'}
           Id_measured: 
             type: readonly float32
             unit: A
@@ -1048,6 +1048,8 @@ interfaces:
       input_torque:
         type: float32
         unit: N·m
+        c_getter: get_input_torque()
+        c_setter: set_input_torque
         doc: |
           In `CONTROL_MODE_TORQUE_CONTROL`, sets the desired output torque of the axis.
           In `CONTROL_MODE_VELOCITY_CONTROL` and `CONTROL_MODE_POSITION_CONTROL`, sets the feed-forward torque of the torque controller.

@@ -6,14 +6,66 @@
 */
 
 #include <sys/unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <string.h>
 #include <board.h>
 
 
-//int _read(int file, char *data, int len) {}
-//int _close(int file) {}
-//int _lseek(int file, int ptr, int dir) {}
-//int _fstat(int file, struct stat *st) {}
-//int _isatty(int file) {}
+// Newlib system calls for this bare-metal target. The application routes
+// output through communication.cpp; stdin has no byte-stream backend, and
+// the firmware has no filesystem or process model.
+int _read(int file, void *data, size_t len) {
+    (void)data;
+    if (file == STDIN_FILENO) return 0; // EOF: no libc stdin stream is connected.
+    if (len == 0) return 0;
+    errno = EBADF;
+    return -1;
+}
+
+int _close(int file) {
+    (void)file;
+    errno = EBADF; // No file descriptors can be opened by this firmware.
+    return -1;
+}
+
+_off_t _lseek(int file, _off_t offset, int dir) {
+    (void)offset;
+    (void)dir;
+    if (file >= STDIN_FILENO && file <= STDERR_FILENO) {
+        errno = ESPIPE; // Standard streams are not seekable.
+    } else {
+        errno = EBADF;
+    }
+    return (_off_t)-1;
+}
+
+int _fstat(int file, struct stat *st) {
+    if (file < STDIN_FILENO || file > STDERR_FILENO || !st) {
+        errno = EBADF;
+        return -1;
+    }
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR;
+    return 0;
+}
+
+int _isatty(int file) {
+    if (file >= STDIN_FILENO && file <= STDERR_FILENO) return 1;
+    errno = EBADF;
+    return 0;
+}
+
+pid_t _getpid(void) {
+    return 1; // Single firmware process.
+}
+
+int _kill(pid_t pid, int sig) {
+    (void)sig;
+    errno = (pid == 1) ? ENOSYS : ESRCH;
+    return -1; // Signals are not supported by the firmware runtime.
+}
 
 extern char _end; // provided by the linker script: it's end of statically allocated section, which is where the heap starts.
 extern char _heap_end_max; // provided by the linker script

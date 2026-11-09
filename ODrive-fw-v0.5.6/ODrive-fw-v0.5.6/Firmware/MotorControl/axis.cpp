@@ -366,7 +366,7 @@ bool Axis::run_homing() {
     controller_.input_pos_ = 0.0f;
     controller_.input_pos_updated();
     controller_.input_vel_ = -controller_.config_.homing_speed;
-    controller_.input_torque_ = 0.0f;
+    controller_.set_input_torque(0.0f);
 
     homing_.is_homed = false;
 

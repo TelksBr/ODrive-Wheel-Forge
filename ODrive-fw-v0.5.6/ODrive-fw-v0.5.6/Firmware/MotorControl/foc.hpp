@@ -26,6 +26,32 @@ public:
             std::optional<float2D>* mod_alpha_beta,
             std::optional<float>* ibus) final;
 
+    // Scalar accessors keep interface getters from passing float2D by value.
+    float p_gain_for_interface() const {
+        return pi_gains_.has_value() ? pi_gains_->first : 0.0f;
+    }
+    float i_gain_for_interface() const {
+        return pi_gains_.has_value() ? pi_gains_->second : 0.0f;
+    }
+    float id_setpoint_for_interface() const {
+        return Idq_setpoint_.has_value() ? Idq_setpoint_->first : 0.0f;
+    }
+    float iq_setpoint_for_interface() const {
+        return Idq_setpoint_.has_value() ? Idq_setpoint_->second : 0.0f;
+    }
+    float vd_setpoint_for_interface() const {
+        return Vdq_setpoint_.has_value() ? Vdq_setpoint_->first : 0.0f;
+    }
+    float vq_setpoint_for_interface() const {
+        return Vdq_setpoint_.has_value() ? Vdq_setpoint_->second : 0.0f;
+    }
+    float ialpha_measured_for_interface() const {
+        return Ialpha_beta_measured_.has_value() ? Ialpha_beta_measured_->first : 0.0f;
+    }
+    float ibeta_measured_for_interface() const {
+        return Ialpha_beta_measured_.has_value() ? Ialpha_beta_measured_->second : 0.0f;
+    }
+
     // Config - these values are set while this controller is inactive
     std::optional<float2D> pi_gains_; // [V/A, V/As] should be auto set after resistance and inductance measurement
     // Dead-band on Id/Iq error: when |Ierr| < this threshold, P term is forced

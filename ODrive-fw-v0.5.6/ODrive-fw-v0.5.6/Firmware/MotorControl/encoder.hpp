@@ -4,6 +4,7 @@
 class Encoder;
 
 #include <board.h> // needed for arm_math.h
+#include <atomic>
 #include <Drivers/STM32/stm32_spi_arbiter.hpp>
 #include "utils.hpp"
 #include <autogen/interfaces.hpp>
@@ -12,6 +13,8 @@ class Encoder;
 
 class Encoder : public ODriveIntf::EncoderIntf {
 public:
+    static_assert(std::atomic<float>::is_always_lock_free,
+                  "FFB encoder snapshots must be lock-free in the control loop");
     static constexpr uint32_t MODE_FLAG_ABS = 0x100;
     static constexpr std::array<float, 6> hall_edge_defaults = 
         {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
@@ -85,6 +88,19 @@ public:
     int32_t hall_model(float internal_pos);
     bool update();
 
+    // Lock-free cross-task snapshots consumed by the 1 kHz FFB task.
+    float get_ffb_pos_turns_snapshot() const {
+        return ffb_pos_turns_snapshot_.load(std::memory_order_relaxed);
+    }
+    float get_ffb_vel_estimate_snapshot() const {
+        return ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed);
+    }
+    void publish_ffb_position_snapshot() {
+        const int32_t cpr = config_.cpr > 0 ? config_.cpr : 10000;
+        ffb_pos_turns_snapshot_.store((float)shadow_count_ / (float)cpr,
+                                      std::memory_order_relaxed);
+    }
+
     TIM_HandleTypeDef* timer_;
     Stm32Gpio index_gpio_;
     Stm32Gpio hallA_gpio_;
@@ -99,6 +115,8 @@ public:
     bool index_found_ = false;
     bool is_ready_ = false;
     int32_t shadow_count_ = 0;
+    std::atomic<float> ffb_pos_turns_snapshot_{0.0f};
+    std::atomic<float> ffb_vel_estimate_snapshot_{0.0f};
     int32_t count_in_cpr_ = 0;
     float interpolation_ = 0.0f;
     OutputPort<float> phase_ = 0.0f;     // [rad]

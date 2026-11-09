@@ -65,12 +65,9 @@ extern "C" void odrive_bridge_start_enc_thread(void) {
 }
 
 extern "C" float odrive_bridge_get_pos_turns(void) {
-    // shadow_count_ é int32 acumulado pelo axis thread (não wrappa em 16-bit
-    // como o timer CNT direto). turns = shadow_count / cpr.
-    int32_t cnt = axes[0].encoder_.shadow_count_;
-    int32_t cpr = axes[0].encoder_.config_.cpr;
-    if (cpr <= 0) cpr = 10000;
-    return (float)cnt / (float)cpr;
+    // Publicado pelo loop de controle do encoder para leitura sem corrida
+    // entre o ISR de 8 kHz e a tarefa FFB de 1 kHz.
+    return axes[0].encoder_.get_ffb_pos_turns_snapshot();
 }
 
 extern "C" void odrive_bridge_set_input_torque(float nm) {
@@ -78,7 +75,7 @@ extern "C" void odrive_bridge_set_input_torque(float nm) {
     // + input_mode=PASSTHROUGH. Fora desses estados, escrita é ignorada pelo
     // Controller::update(). Defaults bakados no firmware atendem (control_mode=1,
     // input_mode=1) mas state precisa ser setado via ASCII ou pela UI HTML.
-    axes[0].controller_.input_torque_ = nm;
+    axes[0].controller_.set_input_torque(nm);
 }
 
 // Bus current/voltage readouts — usados pelo peak tracker do ffb_task.
@@ -96,13 +93,13 @@ extern "C" int   odrive_bridge_motor_is_armed(void)  { return axes[0].motor_.is_
 // não ter valor se ainda nem rodou um ciclo do controller — raro mas
 // possível durante boot).
 extern "C" float odrive_bridge_get_vel_estimate(void) {
-    return axes[0].encoder_.vel_estimate_.any().value_or(0.0f);
+    return axes[0].encoder_.get_ffb_vel_estimate_snapshot();
 }
 extern "C" float odrive_bridge_get_iq_measured(void) {
     return axes[0].motor_.current_control_.Iq_measured_;
 }
 extern "C" float odrive_bridge_get_torque_output(void) {
-    return axes[0].controller_.torque_output_.any().value_or(0.0f);
+    return axes[0].controller_.get_ffb_torque_output_snapshot();
 }
 extern "C" float odrive_bridge_get_brake_resistor_current(void) {
     return odrv.brake_resistor_current_;

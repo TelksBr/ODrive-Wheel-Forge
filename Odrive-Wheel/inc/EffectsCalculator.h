@@ -31,6 +31,7 @@
 #include "PersistentStorage.h"
 #include "CommandHandler.h"
 #include "thread.hpp"
+#include "mutex.hpp"
 #include <vector>
 #include <functional>
 #include "FastAvg.h"
@@ -43,10 +44,6 @@ enum class ClassType : uint32_t { Internal, External, Mainclass };
 
 #define EFFECT_THREAD_MEM 128
 #define EFFECT_THREAD_PRIO 20 // low priority for stat
-
-#define INTERNAL_SCALER_DAMPER 40
-#define INTERNAL_SCALER_FRICTION 45
-#define INTERNAL_SCALER_INERTIA 4
 
 #define CUSTOM_PROFILE_ID 1
 
@@ -81,6 +78,21 @@ struct effect_stat_t {
 	uint16_t nb=0;
 };
 
+class EffectsCalculator;
+
+// Serializes HID effect updates against the 1 kHz force calculation. The
+// guard is task-context only; TinyUSB dispatches HID callbacks from usb_tusb_task.
+class EffectsStateGuard {
+public:
+	explicit EffectsStateGuard(EffectsCalculator& calculator);
+	~EffectsStateGuard();
+	EffectsStateGuard(const EffectsStateGuard&) = delete;
+	EffectsStateGuard& operator=(const EffectsStateGuard&) = delete;
+private:
+	EffectsCalculator& calculator_;
+	bool locked_;
+};
+
 enum class EffectsCalculator_commands : uint32_t {
 	ffbfiltercf,ffbfiltercf_q,effects,spring,friction,damper,inertia,
 	damper_f, damper_q, friction_f, friction_q, inertia_f, inertia_q, filterProfileId,
@@ -99,11 +111,12 @@ public:
 	const ClassIdentifier getInfo();
 	const ClassType getClassType() {return ClassType::Internal;};
 
-	void saveFlash();
+	void saveFlash(uint8_t* globalGainSnapshot = nullptr);
 	void restoreFlash();
 
 	bool isActive();
 	void setActive(bool active);
+	// Caller holds EffectsStateGuard through calculation and output commit.
 	void calculateEffects(std::vector<std::unique_ptr<Axis>> &axes);
 	virtual void setFilters(FFB_Effect* effect);
 	void setGain(uint8_t gain);
@@ -111,6 +124,8 @@ public:
 	void logEffectType(uint8_t type,bool remove = false);
 	//void setDirectionEnableMask(uint8_t mask);
 	void calcStatsEffectType(uint8_t type, int32_t force,uint8_t axis);
+	bool lockEffectState();
+	void unlockEffectState();
 	void logEffectState(uint8_t type,uint8_t state);
 	void resetLoggedActiveEffects(bool reinit);
 
@@ -185,12 +200,13 @@ private:
 	std::array<effect_stat_t,12> effects_stats; // [0..12 effect types]
 	std::array<effect_stat_t,12> effects_statslast; // [0..12 effect types]
 	bool isMonitorEffect = false;
+	cpp_freertos::MutexStandard effects_state_mutex_;
 
 	int32_t calcComponentForce(FFB_Effect *effect, int32_t forceVector, std::vector<std::unique_ptr<Axis>> &axes, uint8_t axis);
-	int32_t calcNonConditionEffectForce(FFB_Effect* effect);
+	int32_t calcNonConditionEffectForce(FFB_Effect* effect, uint32_t now_ms);
 	float speedRampupPct();
 	int32_t calcConditionEffectForce(FFB_Effect *effect, float metric, uint8_t gain, uint8_t idx, float scale, float angle_ratio);
-	int32_t getEnvelopeMagnitude(FFB_Effect *effect);
+	int32_t getEnvelopeMagnitude(FFB_Effect *effect, uint32_t now_ms);
 	std::string listEffectsUsed(bool details = false,uint8_t axis = 0);
 	//std::string listForceEffects();
 	void checkFilterCoeff(biquad_constant_t *filter, uint32_t freq,uint8_t q);

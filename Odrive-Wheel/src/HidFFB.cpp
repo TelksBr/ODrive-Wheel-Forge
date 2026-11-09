@@ -28,9 +28,31 @@
 #include "cppmain.h"
 #include <math.h>
 
+template <typename T>
+static bool copy_hid_report(const uint8_t* buffer, uint16_t size, T& report) {
+	if (buffer == nullptr || size < sizeof(T)) {
+		return false;
+	}
+	memcpy(&report, buffer, sizeof(T));
+	return true;
+}
+
+template <typename T>
+static bool copy_hid_report_with_id(uint8_t report_id, const uint8_t* buffer,
+		uint16_t size, T& report) {
+	if (buffer == nullptr || size < sizeof(T) - 1) return false;
+	auto* bytes = reinterpret_cast<uint8_t*>(&report);
+	bytes[0] = report_id;
+	memcpy(bytes + 1, buffer, sizeof(T) - 1);
+	return true;
+}
+
 HidFFB::HidFFB(std::shared_ptr<EffectsCalculator> ec,uint8_t axisCount) : effects_calc(ec), effects(ec->effects),axisCount(axisCount)
 {
-	directionEnableMask = 1 << axisCount; // Direction enable bit is last bit after axis enable bits
+	// O descriptor anuncia sempre X e Y (MAX_AXIS=2), mesmo que o produto só
+	// tenha um eixo físico. Portanto o bit de direção é fixo no bit 2 (0x04),
+	// não pode ser inferido do número de eixos físicos.
+	directionEnableMask = HID_DIRECTION_ENABLE;
 	// Initialize reports
 	blockLoad_report.effectBlockIndex = 1;
 	blockLoad_report.ramPoolAvailable = (effects.size()-used_effects)*sizeof(FFB_Effect);
@@ -88,6 +110,9 @@ void HidFFB::sendStatusReport(uint8_t effect){
  * Called when HID OUT data is received via USB
  */
 void HidFFB::hidOut(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize){
+	(void)report_type;
+	if (buffer == nullptr) return;
+	EffectsStateGuard state_lock(*effects_calc);
 	fxUpdateEvent(); // use uint16_t for timer overflow handling if micros timer is used
 
 	// FFB Output Message
@@ -99,50 +124,69 @@ void HidFFB::hidOut(uint8_t report_id, hid_report_type_t report_type, uint8_t co
 	{
 
 		case HID_ID_NEWEFREP: //add Effect Report. Feature
-			new_effect((FFB_CreateNewEffect_Feature_Data_t*)(report));
+		{
+			FFB_CreateNewEffect_Feature_Data_t data{};
+			if (copy_hid_report(report, bufsize, data)) new_effect(&data);
 			break;
+		}
 		case HID_ID_EFFREP: // Set Effect
 		{
-			FFB_SetEffect_t setEffectRepBuf;
-			memcpy(&setEffectRepBuf,report,std::min<uint16_t>(sizeof(FFB_SetEffect_t),bufsize)); // Copy report to buffer. only valid range if less axes are used
-			set_effect(&setEffectRepBuf);
+			FFB_SetEffect_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_effect(&data);
 			break;
 		}
 		case HID_ID_CTRLREP: // Control report. 1=Enable Actuators, 2=Disable Actuators, 4=Stop All Effects, 8=Reset, 16=Pause, 32=Continue
-			ffb_control(report[1]);
+			if (bufsize >= 1) ffb_control(report[0]);
 			//sendStatusReport(0);
 			break;
 		case HID_ID_GAINREP: // Set global gain
-			set_gain(report[1]);
+			if (bufsize >= 1) set_gain(report[0]);
 			break;
 		case HID_ID_ENVREP: // Envelope
-			set_envelope((FFB_SetEnvelope_Data_t *)report);
+		{
+			FFB_SetEnvelope_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_envelope(&data);
 			break;
+		}
 		case HID_ID_CONDREP: // Spring, Damper, Friction, Inertia
-			set_condition((FFB_SetCondition_Data_t*)report);
+		{
+			FFB_SetCondition_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_condition(&data);
 			break;
+		}
 		case HID_ID_PRIDREP: // Periodic
-			set_periodic((FFB_SetPeriodic_Data_t*)report);
+		{
+			FFB_SetPeriodic_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_periodic(&data);
 			break;
+		}
 		case HID_ID_CONSTREP: // Constant
-			set_constant_effect((FFB_SetConstantForce_Data_t*)report);
+		{
+			FFB_SetConstantForce_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_constant_effect(&data);
 			break;
+		}
 		case HID_ID_RAMPREP: // Ramp
-			set_ramp((FFB_SetRamp_Data_t *)report);
+		{
+			FFB_SetRamp_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_ramp(&data);
 			break;
+		}
 		case HID_ID_CSTMREP: // Custom. pretty much never used
 			break;
 		case HID_ID_SMPLREP: // Download sample
 			break;
 		case HID_ID_EFOPREP: //Effect operation
 		{
-			set_effect_operation((FFB_EffOp_Data_t*)report);
+			FFB_EffOp_Data_t data{};
+			if (copy_hid_report_with_id(report_id, report, bufsize, data)) set_effect_operation(&data);
 			break;
 		}
 		case HID_ID_BLKFRREP: // Free a block (PID Block Free Report)
 		{
 			// Bug 5: Decrementa used_effects e atualiza ramPoolAvailable para evitar underflow
-			uint8_t eid = report[1];
+			if (bufsize < 1) break;
+			uint8_t eid = report[0];
 			if (eid > 0 && eid <= effects.size()) {
 				effects_calc->free_effect(eid - 1);
 				if (used_effects > 0) {
@@ -170,6 +214,8 @@ void HidFFB::hidOut(uint8_t report_id, hid_report_type_t report_type, uint8_t co
  */
 uint16_t HidFFB::hidGet(uint8_t report_id, hid_report_type_t report_type,uint8_t* buffer, uint16_t reqlen){
 	// Feature gets go here
+	(void)report_type;
+	if (buffer == nullptr || reqlen == 0) return 0;
 
 	uint8_t id = report_id - FFB_ID_OFFSET;
 
@@ -182,11 +228,17 @@ uint16_t HidFFB::hidGet(uint8_t report_id, hid_report_type_t report_type,uint8_t
 		return 1;
 	case HID_ID_BLKLDREP:
 		// Notice: first byte ID is not present in the reply buffer because it is handled by tinyusb internally!
-		memcpy(buffer,&this->blockLoad_report,sizeof(FFB_BlockLoad_Feature_Data_t));
-		return sizeof(FFB_BlockLoad_Feature_Data_t);
+		{
+			const uint16_t size = std::min<uint16_t>(reqlen, sizeof(FFB_BlockLoad_Feature_Data_t));
+			memcpy(buffer, &this->blockLoad_report, size);
+			return size;
+		}
 	case HID_ID_POOLREP:
-		memcpy(buffer,&this->pool_report,sizeof(FFB_PIDPool_Feature_Data_t));
-		return sizeof(FFB_PIDPool_Feature_Data_t);
+		{
+			const uint16_t size = std::min<uint16_t>(reqlen, sizeof(FFB_PIDPool_Feature_Data_t));
+			memcpy(buffer, &this->pool_report, size);
+			return size;
+		}
 	default:
 		break;
 	}
@@ -262,9 +314,15 @@ void HidFFB::set_constant_effect(FFB_SetConstantForce_Data_t* data){
 
 void HidFFB::new_effect(FFB_CreateNewEffect_Feature_Data_t* effect){
 	// Allocates a new effect
+	if (effect->effectType == FFB_EFFECT_NONE || effect->effectType > FFB_EFFECT_CUSTOM) {
+		blockLoad_report.effectBlockIndex = 0;
+		blockLoad_report.loadStatus = 3; // Block Load Error: unsupported effect type
+		return;
+	}
 
 	int32_t index = effects_calc->find_free_effect(effect->effectType); // next effect
 	if(index == -1){
+		blockLoad_report.effectBlockIndex = 0;
 		blockLoad_report.loadStatus = 2;
 #ifdef DEBUGLOG
 		CommandHandler::logSerialDebug("Can't allocate a new effect");
@@ -343,7 +401,9 @@ void HidFFB::set_effect(FFB_SetEffect_t* effect){
 		// toda a força do efeito era perdida (resultando em 0 Nm).
 		// Redirecionamos a componente não-nula para o eixo 0.
 		if (axisCount == 1) {
-			if (effect_p->axisMagnitudes[0] == 0.0f) {
+            // Polar directions at 180°/360° produce tiny nonzero sine values
+            // in floating point, so detect a numerically-zero X component.
+            if (fabsf(effect_p->axisMagnitudes[0]) < 1e-6f) {
 				float fallback = directionEnable ? -cosf(phaseX) :
 				                 (effect->enableAxis & Y_AXIS_ENABLE ? -(effect->directionY - 18000.0f) / 18000.0f : 1.0f);
 				if (fallback == 0.0f) fallback = 1.0f;
@@ -390,8 +450,11 @@ void HidFFB::set_condition(FFB_SetCondition_Data_t *cond){
 	if(cond->effectBlockIndex == 0 || cond->effectBlockIndex > effects.size()){
 		return;
 	}
-	// Bug 10: Máscara nos 4 bits inferiores de parameterBlockOffset e limitação ao índice máximo (axisCount - 1)
-	uint8_t axis = (axisCount > 0) ? std::min<uint8_t>((uint8_t)(axisCount - 1), (uint8_t)(cond->parameterBlockOffset & 0x03)) : 0;
+	// Parameter block offsets refer to the logical HID axes in the descriptor,
+	// not the number of physical motor axes. Keep X and Y conditions in separate
+	// slots even when only X is connected to a motor; otherwise Y can overwrite X.
+	uint8_t axis = std::min<uint8_t>((uint8_t)(MAX_AXIS - 1),
+			(uint8_t)(cond->parameterBlockOffset & 0x03));
 
 	FFB_Effect *effect = &effects[cond->effectBlockIndex - 1];
 	effect->conditions[axis].cpOffset = cond->cpOffset;
@@ -427,6 +490,7 @@ void HidFFB::set_effect_operation(FFB_EffOp_Data_t* report){
 	uint8_t id = report->effectBlockIndex-1;
 	if(report->state == 3){
 		effects[id].state = 0; //Stop
+		effects[id].loopsRemaining = 0;
 #ifdef DEBUGLOG
 		CommandHandler::logSerialDebug("Stop effect: " + std::to_string(id));
 #endif
@@ -449,6 +513,7 @@ void HidFFB::set_effect_operation(FFB_EffOp_Data_t* report){
 		CommandHandler::logSerialDebug("Start effect: " + std::to_string(id));
 #endif
 		effects[id].startTime = HAL_GetTick() + effects[id].startDelay;
+		effects[id].loopsRemaining = report->loopCount;
 		effects[id].state = 1; //Start
 	}
 	this->effects_calc->logEffectState(effects[id].type,effects[id].state);
@@ -487,7 +552,7 @@ void HidFFB::set_periodic(FFB_SetPeriodic_Data_t* report){
 	effect->period = clip<uint32_t,uint32_t>(report->period,1,0x7fff); // Period is never 0
 	effect->magnitude = report->magnitude;
 	effect->offset = report->offset;
-	effect->phase = report->phase;
+	effect->phase = (uint16_t)(report->phase % 36000u);
 }
 
 

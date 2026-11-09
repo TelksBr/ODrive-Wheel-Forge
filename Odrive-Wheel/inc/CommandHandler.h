@@ -14,14 +14,14 @@ enum class CMDtype : uint8_t { none, info, get, set, setget, err, getat, setat }
 // Forward declaration of CommandInterface — the broadcastCommandReplyAsync
 // stub is defined after CommandReply below.
 
-namespace {
+namespace command_handler_stub {
 enum class ClassVisibility { Normal, Hidden, hidden = Hidden };
 }
 
 struct ClassIdentifier {
     const char *name;
     uint32_t id;
-    ClassVisibility visibility = ClassVisibility::Normal;
+    command_handler_stub::ClassVisibility visibility = command_handler_stub::ClassVisibility::Normal;
 };
 
 struct ParsedCommand {

@@ -390,7 +390,7 @@ void AsciiProtocol::cmd_set_position(char * pStr, bool use_checksum) {
         if (numscan >= 3)
             axis.controller_.input_vel_ = vel_feed_forward;
         if (numscan >= 4)
-            axis.controller_.input_torque_ = torque_feed_forward;
+            axis.controller_.set_input_torque(torque_feed_forward);
         axis.controller_.input_pos_updated();
         axis.watchdog_feed();
     }
@@ -439,7 +439,7 @@ void AsciiProtocol::cmd_set_velocity(char * pStr, bool use_checksum) {
         axis.controller_.config_.control_mode = Controller::CONTROL_MODE_VELOCITY_CONTROL;
         axis.controller_.input_vel_ = vel_setpoint;
         if (numscan >= 3)
-            axis.controller_.input_torque_ = torque_feed_forward;
+            axis.controller_.set_input_torque(torque_feed_forward);
         axis.watchdog_feed();
     }
 }
@@ -459,7 +459,7 @@ void AsciiProtocol::cmd_set_torque(char * pStr, bool use_checksum) {
     } else {
         Axis& axis = axes[motor_number];
         axis.controller_.config_.control_mode = Controller::CONTROL_MODE_TORQUE_CONTROL;
-        axis.controller_.input_torque_ = torque_setpoint;
+        axis.controller_.set_input_torque(torque_setpoint);
         axis.watchdog_feed();
     }
 }

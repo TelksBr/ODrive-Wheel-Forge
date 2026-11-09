@@ -30,10 +30,25 @@
 ClassIdentifier EffectsCalculator::info = {
 		  .name = "Effects" ,
 		  .id	= CLSID_EFFECTSCALC,
-		  .visibility = ClassVisibility::hidden
+		  .visibility = command_handler_stub::ClassVisibility::hidden
 };
 const ClassIdentifier EffectsCalculator::getInfo(){
 	return info;
+}
+
+EffectsStateGuard::EffectsStateGuard(EffectsCalculator& calculator)
+	: calculator_(calculator), locked_(calculator_.lockEffectState()) {}
+
+EffectsStateGuard::~EffectsStateGuard() {
+	if (locked_) calculator_.unlockEffectState();
+}
+
+bool EffectsCalculator::lockEffectState() {
+	return effects_state_mutex_.Lock();
+}
+
+void EffectsCalculator::unlockEffectState() {
+	effects_state_mutex_.Unlock();
 }
 
 EffectsCalculator::EffectsCalculator() : CommandHandler("fx", CLSID_EFFECTSCALC),
@@ -85,6 +100,7 @@ void EffectsCalculator::setActive(bool active)
 }
 
 void EffectsCalculator::updateSamplerate(float newSamplerate){
+	EffectsStateGuard state_lock(*this);
 	this->calcfrequency = newSamplerate;
 	for(FFB_Effect &effect : this->effects){
 		if(effect.filter[0]){ // Update filters if effect has filters
@@ -114,17 +130,21 @@ An inertia condition uses axis acceleration as the metric.
 void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axes)
 {
 	for (auto &axis : axes) {
-		axis->setEffectTorque(0);
 		axis->calculateAxisEffects(isActive());
 	}
 
 	if(!isActive()){
+		for (auto &axis : axes) {
+			axis->setEffectTorque(0);
+		}
 		return;
 	}
 
 	int32_t force = 0;
 	int axisCount = axes.size();
 	int32_t forces[MAX_AXIS] = {0};
+	// Use one coherent time snapshot for every effect in this output sample.
+	const uint32_t now_ms = HAL_GetTick();
 
 	for (uint8_t i = 0; i < effects_stats.size(); i++)
 	{
@@ -135,18 +155,30 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
 	{
 		FFB_Effect *effect = &effects[fxi];
 
-		// Effect activated and not infinite (0 or 0xffff)
-		if (effect->state != EFFECT_STATE_INACTIVE && effect->duration != FFB_EFFECT_DURATION_INFINITE && effect->duration != 0){
-			// Start delay not yet reached
-			if(HAL_GetTick() < effect->startTime){
+		if (effect->state != EFFECT_STATE_INACTIVE) {
+			// HID startDelay applies to finite and infinite effects. The signed
+			// modular comparison is valid because the delay is at most 65535 ms.
+			const uint32_t elapsed_ms = now_ms - effect->startTime;
+			if ((int32_t)elapsed_ms < 0) {
 				continue;
 			}
-			// If effect has expired make inactive
-			if (HAL_GetTick() - effect->startTime > effect->duration)
-			{
-				effect->state = EFFECT_STATE_INACTIVE;
-				for(uint8_t axis=0 ; axis < axisCount ; axis++)
-					calcStatsEffectType(effect->type, 0,axis); // record a 0 on the ended force
+			// Finite effects expire after their duration; infinite effects do not.
+			if (effect->duration != FFB_EFFECT_DURATION_INFINITE && effect->duration != 0) {
+				if (elapsed_ms >= effect->duration)
+				{
+					const uint32_t completed_cycles = elapsed_ms / effect->duration;
+					if (effect->loopsRemaining == FFB_EFFECT_LOOP_INFINITE) {
+						// Rebase to the current iteration without accumulating sample jitter.
+						effect->startTime += completed_cycles * effect->duration;
+					} else if (effect->loopsRemaining > completed_cycles) {
+						effect->loopsRemaining -= (uint8_t)completed_cycles;
+						effect->startTime += completed_cycles * effect->duration;
+					} else {
+						effect->state = EFFECT_STATE_INACTIVE;
+						for(uint8_t axis=0 ; axis < axisCount ; axis++)
+							calcStatsEffectType(effect->type, 0,axis); // record a 0 on the ended force
+					}
+				}
 			}
 		}
 
@@ -156,7 +188,7 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
 			continue;
 		}
 
-		force = calcNonConditionEffectForce(effect);
+		force = calcNonConditionEffectForce(effect, now_ms);
 
 		for(uint8_t axis=0 ; axis < axisCount ; axis++) // Calculate effects for all axes
 		{
@@ -180,13 +212,13 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
  * Calculates forces from a non conditional effect
  * Periodic and constant effects
  */
-int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect) {
+int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect, uint32_t now_ms) {
 	int32_t force_vector = 0;
 	int32_t magnitude = effect->magnitude;
 
 	// If using an envelope modulate the magnitude based on time
 	if(effect->useEnvelope){
-		magnitude = getEnvelopeMagnitude(effect);
+		magnitude = getEnvelopeMagnitude(effect, now_ms);
 	}
 	switch (effect->type){
 
@@ -198,18 +230,50 @@ int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect) {
 
 	case FFB_EFFECT_RAMP:
 	{
-		// Bug 7: Previne divisão por zero se duration <= 0 e limita interpolação entre startLevel e endLevel
-		float elapsed_time = (micros() / 1000.0f) - (float)effect->startTime;
-		int32_t duration = effect->duration;
+		const uint32_t elapsed_ms = now_ms - effect->startTime;
+		const int32_t duration = effect->duration;
 		if (duration <= 0) {
 			force_vector = effect->endLevel;
-		} else if (elapsed_time >= (float)duration) {
+		} else if (effect->useEnvelope) {
+			const uint32_t duration_ms = (uint32_t)duration;
+			uint32_t attack_time = std::min(effect->attackTime, duration_ms);
+			uint32_t fade_time = std::min(effect->fadeTime, duration_ms);
+			const uint64_t envelope_time_sum = (uint64_t)attack_time + fade_time;
+			if (envelope_time_sum > duration_ms) {
+				attack_time = (uint32_t)((uint64_t)attack_time * duration_ms / envelope_time_sum);
+				fade_time = duration_ms - attack_time;
+			}
+
+			const uint32_t ramp_elapsed = std::min(elapsed_ms, duration_ms);
+			const int32_t ramp_start = effect->startLevel;
+			const int32_t ramp_end = effect->endLevel;
+			auto ramp_level_at = [ramp_start, ramp_end, duration_ms](uint32_t time_ms) -> int32_t {
+				const int64_t delta = (int64_t)ramp_end - ramp_start;
+				return ramp_start + (int32_t)(delta * time_ms / duration_ms);
+			};
+
+			if (attack_time != 0 && ramp_elapsed < attack_time) {
+				const int32_t attack_level = (int32_t)std::min<uint16_t>(effect->attackLevel, 0x7FFF);
+				const int32_t attack_start = ramp_start < 0 ? -attack_level : attack_level;
+				const int32_t attack_end = ramp_level_at(attack_time);
+				const int64_t delta = (int64_t)attack_end - attack_start;
+				force_vector = attack_start + (int32_t)(delta * ramp_elapsed / attack_time);
+			} else if (fade_time != 0 && ramp_elapsed >= duration_ms - fade_time) {
+				const uint32_t fade_start_time = duration_ms - fade_time;
+				const uint32_t fade_elapsed = ramp_elapsed - fade_start_time;
+				const int32_t fade_start = ramp_level_at(fade_start_time);
+				const int32_t fade_level = (int32_t)std::min<uint16_t>(effect->fadeLevel, 0x7FFF);
+				const int32_t fade_end = ramp_end < 0 ? -fade_level : fade_level;
+				const int64_t delta = (int64_t)fade_end - fade_start;
+				force_vector = fade_start + (int32_t)(delta * fade_elapsed / fade_time);
+			} else {
+				force_vector = ramp_level_at(ramp_elapsed);
+			}
+		} else if (elapsed_ms >= (uint32_t)duration) {
 			force_vector = effect->endLevel;
-		} else if (elapsed_time <= 0.0f) {
-			force_vector = effect->startLevel;
 		} else {
-			force_vector = (int32_t)effect->startLevel +
-			               (int32_t)((elapsed_time * (float)(effect->endLevel - effect->startLevel)) / (float)duration);
+			const int64_t delta = (int64_t)effect->endLevel - effect->startLevel;
+			force_vector = effect->startLevel + (int32_t)(delta * elapsed_ms / (uint32_t)duration);
 		}
 		break;
 	}
@@ -224,9 +288,13 @@ int32_t EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect) {
 		// sem degradação ou jitter após horas de uso contínuo, e com proteção total contra divisão por zero (period == 0).
 		uint32_t period_ms = std::max<uint32_t>((uint32_t)effect->period, 1);
 		uint32_t period_us = period_ms * 1000;
-		uint32_t elapsed_us = micros() - ((uint32_t)effect->startTime * 1000);
-		uint32_t phase_us = ((uint32_t)effect->phase * period_us) / 36000;
-		uint32_t cycle_pos_us = (elapsed_us + phase_us) % period_us;
+		// Use the same wrap-safe millisecond clock as effect start/duration.
+		// Taking modulo before scaling keeps the phase stable across micros()
+		// wrap every 71 minutes, even for infinite periodic effects.
+		uint32_t elapsed_ms = now_ms - effect->startTime;
+		uint32_t elapsed_phase_us = (elapsed_ms % period_ms) * 1000u;
+		uint32_t phase_us = (uint32_t)(((uint64_t)(effect->phase % 36000u) * period_us) / 36000u);
+		uint32_t cycle_pos_us = (elapsed_phase_us + phase_us) % period_us;
 		float phase_norm = (float)cycle_pos_us / (float)period_us; // Exatamente no intervalo [0.0, 1.0)
 
 		if (effect->type == FFB_EFFECT_SQUARE) {
@@ -326,7 +394,7 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 		float speedRampupCeil = speedRampupPct();
 
 		// Effect is only active outside deadband + offset
-		if (abs((int32_t)speed - offset) > deadBand){
+		if (fabsf(speed - (float)offset) > (float)deadBand){
 
 			// remove offset/deadband from metric to compute force
 			speed -= (offset + (deadBand * (speed < offset ? -1 : 1)) );
@@ -341,7 +409,9 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 			}
 
 			int8_t sign = speed >= 0 ? 1 : -1;
-			uint16_t coeff = speed < 0 ? effect->conditions[con_idx].negativeCoefficient : effect->conditions[con_idx].positiveCoefficient;
+			int32_t coeff = speed < 0
+				? (int32_t)effect->conditions[con_idx].negativeCoefficient
+				: (int32_t)effect->conditions[con_idx].positiveCoefficient;
 			force = coeff * rampupFactor * sign;
 
 			//if there is a saturation, used it to clip result
@@ -349,7 +419,8 @@ int32_t EffectsCalculator::calcComponentForce(FFB_Effect *effect, int32_t forceV
 				force = clip<int32_t, int32_t>(force, -effect->conditions[con_idx].negativeSaturation, effect->conditions[con_idx].positiveSaturation);
 			}
 
-			int32_t force_raw = (((gain.friction + 1) * force) >> 8) * angle_ratio * scaler.friction;
+			const float frictionGain = gain.friction == 0 ? 0.0f : (float)(gain.friction + 1) / 256.0f;
+			int32_t force_raw = (int32_t)(frictionGain * (float)force * angle_ratio * scaler.friction);
 			if (effect->filter[axis] != nullptr) {
 				result_torque -= effect->filter[axis]->process(force_raw);
 			} else {
@@ -409,10 +480,10 @@ int32_t EffectsCalculator::calcConditionEffectForce(FFB_Effect *effect, float  m
 	int16_t offset = effect->conditions[idx].cpOffset;
 	int16_t deadBand = effect->conditions[idx].deadBand;
 	int32_t force = 0;
-	float gainfactor = (float)(gain+1) / 256.0;
+	float gainfactor = gain == 0 ? 0.0f : (float)(gain + 1) / 256.0f;
 
 	// Effect is only active outside deadband + offset
-	if (abs(metric - offset) > deadBand){
+	if (fabsf(metric - (float)offset) > (float)deadBand){
 		float coefficient = effect->conditions[idx].negativeCoefficient;
 		if(metric > offset){
 			coefficient = effect->conditions[idx].positiveCoefficient;
@@ -441,29 +512,38 @@ int32_t EffectsCalculator::calcConditionEffectForce(FFB_Effect *effect, float  m
  * until the fade time where the strength changes to the fade level until the stop time of the effect.
  * Infinite effects can't have an envelope and return the normal magnitude.
  */
-int32_t EffectsCalculator::getEnvelopeMagnitude(FFB_Effect *effect)
+int32_t EffectsCalculator::getEnvelopeMagnitude(FFB_Effect *effect, uint32_t now_ms)
 {
 	if(effect->duration == FFB_EFFECT_DURATION_INFINITE || effect->duration == 0){
 		return effect->magnitude; // Effect is infinite. envelope is invalid
 	}
-	int32_t scaler = abs(effect->magnitude);
-	uint32_t elapsed_time = HAL_GetTick() - effect->startTime;
-	if (elapsed_time > effect->duration) {
-		elapsed_time = effect->duration;
+	const uint32_t duration = effect->duration;
+	uint32_t attack_time = std::min(effect->attackTime, duration);
+	uint32_t fade_time = std::min(effect->fadeTime, duration);
+	const uint64_t envelope_time_sum = (uint64_t)attack_time + fade_time;
+	// Keep attack and fade segments from overlapping when a host supplies
+	// timings whose sum exceeds the finite effect duration.
+	if (envelope_time_sum > duration) {
+		attack_time = (uint32_t)((uint64_t)attack_time * duration / envelope_time_sum);
+		fade_time = duration - attack_time;
 	}
-	if (elapsed_time < effect->attackTime && effect->attackTime != 0)
-	{
-		scaler = (scaler - effect->attackLevel) * (int32_t)elapsed_time;
-		scaler /= (int32_t)effect->attackTime;
-		scaler += effect->attackLevel;
+
+	const uint32_t elapsed_raw = now_ms - effect->startTime;
+	const uint32_t elapsed_time = std::min(elapsed_raw, duration);
+	const int32_t magnitude = std::abs((int32_t)effect->magnitude);
+	const int32_t attack_level = std::min<uint16_t>(effect->attackLevel, 0x7FFF);
+	const int32_t fade_level = std::min<uint16_t>(effect->fadeLevel, 0x7FFF);
+	int32_t scaler = magnitude;
+	if (attack_time != 0 && elapsed_time < attack_time) {
+		const int64_t delta = (int64_t)magnitude - attack_level;
+		scaler = attack_level + (int32_t)(delta * elapsed_time / attack_time);
 	}
-	if (elapsed_time > (effect->duration - effect->fadeTime) && effect->fadeTime != 0)
-	{
-		scaler = (scaler - effect->fadeLevel) * (int32_t)(effect->duration - elapsed_time);
-		scaler /= (int32_t)effect->fadeTime;
-		scaler += effect->fadeLevel;
+	if (fade_time != 0 && elapsed_time >= duration - fade_time) {
+		const uint32_t remaining = duration - elapsed_time;
+		const int64_t delta = (int64_t)scaler - fade_level;
+		scaler = fade_level + (int32_t)(delta * remaining / fade_time);
 	}
-	scaler = signbit(effect->magnitude) ? -scaler : scaler; // Follow original sign of magnitude because envelope has no sign (important for constant force)
+	if (effect->magnitude < 0) scaler = -scaler;
 	return scaler;
 }
 
@@ -571,48 +651,64 @@ void EffectsCalculator::restoreFlash()
 		gain.spring = (effects & 0xff);
 	}
 	if(Flash_Read(ADR_FFB_EFFECTS3, &effects)){
-		filterProfileId = (effects >> 8) & 0x03;
-		frictionPctSpeedToRampup = (effects & 0xff);
+		filterProfileId = clip<uint8_t, uint8_t>(
+			(uint8_t)((effects >> 8) & 0x03), 0, CUSTOM_PROFILE_ID);
+		frictionPctSpeedToRampup = clip<uint8_t, uint8_t>(effects & 0xff, 0, 100);
 	}
 
 }
 
 // Saves parameters to flash
-void EffectsCalculator::saveFlash()
+void EffectsCalculator::saveFlash(uint8_t* globalGainSnapshot)
 {
+	effect_gain_t gainSnapshot;
+	effect_biquad_t filterSnapshot[2];
+	uint8_t filterProfileSnapshot;
+	uint8_t frictionRampupSnapshot;
+	{
+		EffectsStateGuard state_lock(*this);
+		gainSnapshot = gain;
+		filterSnapshot[0] = filter[0];
+		filterSnapshot[1] = filter[CUSTOM_PROFILE_ID];
+		filterProfileSnapshot = filterProfileId;
+		frictionRampupSnapshot = frictionPctSpeedToRampup;
+		if (globalGainSnapshot) *globalGainSnapshot = global_gain;
+	}
+
+	// Flash programming starts after the effect state snapshot is unlocked.
 	uint16_t filterStorage;
 
 	// save CF biquad
-	filterStorage = (uint16_t)filter[0].constant.freq & 0x1FF;
-	filterStorage |= ( (uint16_t)filter[0].constant.q & 0x7F ) << 9 ;
+	filterStorage = (uint16_t)filterSnapshot[0].constant.freq & 0x1FF;
+	filterStorage |= ( (uint16_t)filterSnapshot[0].constant.q & 0x7F ) << 9 ;
 	Flash_Write(ADR_FFB_CF_FILTER, filterStorage);
 
-	if(filterProfileId == CUSTOM_PROFILE_ID){ // Only attempt saving if custom profile active
+	if(filterProfileSnapshot == CUSTOM_PROFILE_ID){ // Only attempt saving if custom profile active
 		// save Friction biquad
-		filterStorage = (uint16_t)filter[CUSTOM_PROFILE_ID].friction.freq & 0x1FF;
-		filterStorage |= ( (uint16_t)filter[CUSTOM_PROFILE_ID].friction.q & 0x7F ) << 9 ;
+		filterStorage = (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].friction.freq & 0x1FF;
+		filterStorage |= ( (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].friction.q & 0x7F ) << 9 ;
 		Flash_Write(ADR_FFB_FR_FILTER, filterStorage);
 
 		// save Damper biquad
-		filterStorage = (uint16_t)filter[CUSTOM_PROFILE_ID].damper.freq & 0x1FF;
-		filterStorage |= ( (uint16_t)filter[CUSTOM_PROFILE_ID].damper.q & 0x7F ) << 9 ;
+		filterStorage = (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].damper.freq & 0x1FF;
+		filterStorage |= ( (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].damper.q & 0x7F ) << 9 ;
 		Flash_Write(ADR_FFB_DA_FILTER, filterStorage);
 
 		// save Inertia biquad
-		filterStorage = (uint16_t)filter[CUSTOM_PROFILE_ID].inertia.freq & 0x1FF;
-		filterStorage |= ( (uint16_t)filter[CUSTOM_PROFILE_ID].inertia.q & 0x7F ) << 9 ;
+		filterStorage = (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].inertia.freq & 0x1FF;
+		filterStorage |= ( (uint16_t)filterSnapshot[CUSTOM_PROFILE_ID].inertia.q & 0x7F ) << 9 ;
 		Flash_Write(ADR_FFB_IN_FILTER, filterStorage);
 	}
 
 	// save the effect gain
-	uint16_t effects = gain.inertia | (gain.friction << 8);
+	uint16_t effects = gainSnapshot.inertia | (gainSnapshot.friction << 8);
 	Flash_Write(ADR_FFB_EFFECTS1, effects);
 
-	effects = gain.spring | (gain.damper << 8);
+	effects = gainSnapshot.spring | (gainSnapshot.damper << 8);
 	Flash_Write(ADR_FFB_EFFECTS2, effects);
 
 	// save the friction rampup zone
-	effects = frictionPctSpeedToRampup | (filterProfileId << 8);
+	effects = frictionRampupSnapshot | (filterProfileSnapshot << 8);
 	Flash_Write(ADR_FFB_EFFECTS3, effects);
 
 }
@@ -738,6 +834,7 @@ void EffectsCalculator::resetLoggedActiveEffects(bool reinit){
 }
 
 CommandStatus EffectsCalculator::command(const ParsedCommand& cmd,std::vector<CommandReply>& replies){
+	EffectsStateGuard state_lock(*this);
 	switch(static_cast<EffectsCalculator_commands>(cmd.cmdId)){
 
 	case EffectsCalculator_commands::ffbfiltercf:

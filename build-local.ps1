@@ -151,6 +151,7 @@ if (Test-Path $hexPath) { Remove-Item -Force $hexPath }
 
 $scriptContent = @(
   "set -euo pipefail",
+  "exec 2>&1",
   ('export PATH="{0}:/mingw64/bin:/usr/bin:$PATH"' -f $msysToolchain),
   ('cd "{0}"' -f $msysFirmware)
 )
@@ -162,16 +163,38 @@ if (-not $NoClean) {
 $scriptContent += '/mingw64/bin/mingw32-make -j$(nproc)'
 
 $tempScript = Join-Path $firmwareDir ".build_runner.sh"
+$runId = [Guid]::NewGuid().ToString("N")
+$stdoutPath = Join-Path $firmwareDir ".build-$runId.stdout"
+$stderrPath = Join-Path $firmwareDir ".build-$runId.stderr"
 [System.IO.File]::WriteAllLines($tempScript, $scriptContent)
 $msysScript = Convert-ToMsysPath $tempScript
 
 Write-Host "Running build in $firmwareDir"
 try {
-  & $MsysBash $msysScript
-  $buildExitCode = $LASTEXITCODE
+  # Capture bash output as text files so Windows PowerShell does not convert
+  # compiler stderr diagnostics into NativeCommandError records.
+  $buildProcess = Start-Process -FilePath $MsysBash `
+    -ArgumentList @($msysScript) `
+    -Wait -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath
+
+  if (Test-Path $stdoutPath) {
+    Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Output $_ }
+  }
+  if (Test-Path $stderrPath) {
+    Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Output $_ }
+  }
+  $buildExitCode = $buildProcess.ExitCode
 } finally {
   if (Test-Path $tempScript) {
     Remove-Item -Force $tempScript
+  }
+  if (Test-Path $stdoutPath) {
+    Remove-Item -Force $stdoutPath
+  }
+  if (Test-Path $stderrPath) {
+    Remove-Item -Force $stderrPath
   }
 }
 

@@ -571,8 +571,12 @@ void Motor::update(uint32_t timestamp) {
     float torque = direction_ * *maybe_torque;
 
     // Load setpoints from previous iteration.
-    auto [id, iq] = Idq_setpoint_.previous()
-                     .value_or(float2D{0.0f, 0.0f});
+    float2D previous_idq{0.0f, 0.0f};
+    const auto previous_idq_value = Idq_setpoint_.previous();
+    if (previous_idq_value.has_value()) {
+        previous_idq = *previous_idq_value;
+    }
+    auto [id, iq] = previous_idq;
     // Load effective current limit
     float ilim = axis_->motor_.effective_current_lim_;
 

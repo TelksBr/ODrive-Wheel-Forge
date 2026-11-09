@@ -776,17 +776,6 @@ static int h_odrv_maxtorque(uint8_t, CmdType t, const char *v, char *r, size_t s
 
 // ======================== sys.* (utilities) =================================
 
-static int h_help(uint8_t, CmdType, const char*, char *reply, size_t size) {
-    size_t off = 0;
-    for (size_t i = 0; i < cmdtable_size; i++) {
-        int n = snprintf(reply + off, size - off, "%s%s.%s",
-                         i == 0 ? "" : " | ",
-                         cmdtable[i].class_name, cmdtable[i].cmd_name);
-        if (n < 0 || (size_t)n >= size - off) break;
-        off += (size_t)n;
-    }
-    return 0;
-}
 static int h_sys_uptime(uint8_t, CmdType, const char*, char *r, size_t s) {
     snprintf(r, s, "%lums", (unsigned long)HAL_GetTick());
     return 0;
@@ -926,16 +915,57 @@ static int h_sys_mtstatus(uint8_t, CmdType t, const char*, char *r, size_t s) {
 // fxtest — diagnóstico FFB sumarizado em uma linha
 extern int   ffb_is_active(void);
 extern float ffb_get_pending_torque_nm(void);
-extern float ffb_get_speed(void);
 extern int   ffb_count_active_effects(void);
+extern uint32_t ffb_diag_hidout_neweff(void);
+extern uint32_t ffb_diag_hidout_seteff(void);
+extern uint32_t ffb_diag_hidout_cond(void);
+extern uint32_t ffb_diag_hidout_const(void);
+extern uint32_t ffb_diag_hidout_period(void);
+extern uint32_t ffb_diag_hidout_efop(void);
+extern uint32_t ffb_diag_loop_last_us(void);
+extern uint32_t ffb_diag_loop_max_us(void);
+extern uint32_t ffb_diag_calc_max_us(void);
+extern uint32_t ffb_diag_lock_wait_max_us(void);
+extern uint32_t ffb_diag_lock_hold_max_us(void);
+extern uint32_t ffb_diag_loop_overruns(void);
+extern uint32_t ffb_diag_loop_samples(void);
+extern uint32_t ffb_diag_sample_last_us(void);
+extern uint32_t ffb_diag_sample_max_us(void);
+extern uint32_t ffb_diag_period_overruns(void);
+extern void ffb_diag_reset_perf(void);
 static int h_sys_fxtest(uint8_t, CmdType t, const char*, char *r, size_t s) {
     if (t != CMD_TYPE_GET) return -1;
-    snprintf(r, s, "ffb=%d pos=%.1f spd=%.1f trq=%.3f fx=%d",
+    snprintf(r, s, "ffb=%d tq=%.2f slots=%d new=%lu set=%lu cond=%lu per=%lu cf=%lu op=%lu",
         ffb_is_active(),
-        (double)ffb_get_pos_degrees(),
-        (double)ffb_get_speed(),
         (double)ffb_get_pending_torque_nm(),
-        ffb_count_active_effects());
+        ffb_count_active_effects(),
+        (unsigned long)ffb_diag_hidout_neweff(),
+        (unsigned long)ffb_diag_hidout_seteff(),
+        (unsigned long)ffb_diag_hidout_cond(),
+        (unsigned long)ffb_diag_hidout_period(),
+        (unsigned long)ffb_diag_hidout_const(),
+        (unsigned long)ffb_diag_hidout_efop());
+    return 0;
+}
+
+// ffbperf? reports the measured FFB-loop budget in microseconds.
+// ffbperf! resets the counters so a test can isolate a single scenario.
+static int h_sys_ffbperf(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t == CMD_TYPE_EXEC) ffb_diag_reset_perf();
+    else if (t != CMD_TYPE_GET) return -1;
+    // Keep the complete worst-case uint32 reply below cmdparser's 128-byte
+    // buffer. L=loop last/max, C=calc path max, W=mutex wait max,
+    // H=mutex hold max, O=loop overruns, S=sample interval last/max, P=period overruns.
+    snprintf(r, s, "L=%lu/%luus C=%luus W=%luus H=%luus O=%lu S=%lu/%luus P=%lu",
+        (unsigned long)ffb_diag_loop_last_us(),
+        (unsigned long)ffb_diag_loop_max_us(),
+        (unsigned long)ffb_diag_calc_max_us(),
+        (unsigned long)ffb_diag_lock_wait_max_us(),
+        (unsigned long)ffb_diag_lock_hold_max_us(),
+        (unsigned long)ffb_diag_loop_overruns(),
+        (unsigned long)ffb_diag_sample_last_us(),
+        (unsigned long)ffb_diag_sample_max_us(),
+        (unsigned long)ffb_diag_period_overruns());
     return 0;
 }
 
@@ -1066,6 +1096,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "mteeprom",     h_sys_mteeprom },      // persiste register map (6s!)
     { "sys",   "mtstatus",     h_sys_mtstatus },      // boot/warnings/auto-cal
     { "sys",   "fxtest",       h_sys_fxtest },
+    { "sys",   "ffbperf",      h_sys_ffbperf },
 
     // odrv.* (read-only; Configurator não escreve hardware aqui)
     { "odrv",  "vbus",         h_odrv_vbus },

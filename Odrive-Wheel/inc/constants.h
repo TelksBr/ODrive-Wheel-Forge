@@ -22,10 +22,10 @@
 #define USE_EEPROM_EMULATION
 #endif
 
-// FFB internal scalers (valores padrão do OpenFFBoard)
-#define INTERNAL_SCALER_DAMPER      0x04
-#define INTERNAL_SCALER_FRICTION    0x04
-#define INTERNAL_SCALER_INERTIA     0x04
+// FFB internal scalers (valores usados pelo EffectsCalculator do OpenFFBoard)
+#define INTERNAL_SCALER_DAMPER      40
+#define INTERNAL_SCALER_FRICTION    45
+#define INTERNAL_SCALER_INERTIA     4
 #define INTERNAL_SCALER_SPRING      0x10
 
 #endif

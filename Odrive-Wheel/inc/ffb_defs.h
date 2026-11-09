@@ -96,6 +96,7 @@
 
 #define HID_DIRECTION_ENABLE 0x04
 #define FFB_EFFECT_DURATION_INFINITE 0xffff
+#define FFB_EFFECT_LOOP_INFINITE 0xffu
 
 // Only include these for cpp
 #ifdef __cplusplus
@@ -291,8 +292,8 @@ typedef struct
 {
 	uint8_t reportId;
 	uint8_t effectBlockIndex;
-	uint16_t startLevel;
-	uint16_t endLevel;
+	int16_t startLevel;
+	int16_t endLevel;
 } __attribute__((packed)) FFB_SetRamp_Data_t;
 
 typedef struct
@@ -330,7 +331,7 @@ typedef struct
 	float axisMagnitudes[MAX_AXIS] = {0}; // 0=0,100%=1
 
 	FFB_Effect_Condition conditions[MAX_AXIS];
-	int16_t phase = 0;
+	uint16_t phase = 0; // degrees × 100, normalized to [0, 36000)
 	uint16_t period = 0;
 	uint32_t duration = FFB_EFFECT_DURATION_INFINITE;					 // Duration in ms
 	uint16_t attackLevel = 0, fadeLevel = 0; // Envelope effect
@@ -340,6 +341,7 @@ typedef struct
 	uint16_t startDelay = 0;
 	uint32_t startTime = 0;	  // Elapsed time in ms before effect starts
 	uint16_t samplePeriod = 0;
+	uint8_t loopsRemaining = 1;
 	bool useEnvelope = false;
 	bool useSingleCondition = true;
 } FFB_Effect;
