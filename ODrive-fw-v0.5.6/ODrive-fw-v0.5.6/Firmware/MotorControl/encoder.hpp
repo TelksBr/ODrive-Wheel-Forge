@@ -120,11 +120,20 @@ public:
 
     void publish_ffb_motion_snapshot(float position_turns,
                                      float velocity_turns_per_second) {
-        ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_acq_rel);
+        // All writers are serialized: Encoder::update() is the only ISR
+        // writer, while calibration/configuration writers use critical
+        // sections. A load/store version update avoids LDREX/STREX retries
+        // in the 8 kHz control loop.
+        const uint32_t sequence =
+            ffb_motion_snapshot_sequence_.load(std::memory_order_relaxed);
+        ffb_motion_snapshot_sequence_.store(sequence + 1u,
+                                            std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         ffb_pos_turns_snapshot_.store(position_turns, std::memory_order_relaxed);
         ffb_vel_estimate_snapshot_.store(velocity_turns_per_second,
                                          std::memory_order_relaxed);
-        ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_release);
+        ffb_motion_snapshot_sequence_.store(sequence + 2u,
+                                            std::memory_order_release);
     }
 
     TIM_HandleTypeDef* timer_;

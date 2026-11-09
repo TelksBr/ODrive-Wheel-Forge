@@ -273,13 +273,35 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             encoder_header,
             "void publish_ffb_motion_snapshot(float position_turns,",
         )
-        first_write = snapshot_writer.index("ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_acq_rel)")
+        sequence_read = snapshot_writer.index(
+            "ffb_motion_snapshot_sequence_.load(std::memory_order_relaxed)"
+        )
+        odd_publish = snapshot_writer.index(
+            "ffb_motion_snapshot_sequence_.store(sequence + 1u,"
+        )
+        writer_fence = snapshot_writer.index(
+            "std::atomic_thread_fence(std::memory_order_seq_cst)"
+        )
         position_write = snapshot_writer.index("ffb_pos_turns_snapshot_.store(position_turns")
         velocity_write = snapshot_writer.index("ffb_vel_estimate_snapshot_.store(velocity_turns_per_second")
-        final_publish = snapshot_writer.index("ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_release)")
-        self.assertLess(first_write, position_write)
+        final_publish = snapshot_writer.index(
+            "ffb_motion_snapshot_sequence_.store(sequence + 2u,"
+        )
+        self.assertLess(sequence_read, odd_publish)
+        self.assertLess(odd_publish, writer_fence)
+        self.assertLess(writer_fence, position_write)
         self.assertLess(position_write, velocity_write)
         self.assertLess(velocity_write, final_publish)
+        self.assertNotIn("ffb_motion_snapshot_sequence_.fetch_add", snapshot_writer)
+
+        # The uint32 version may wrap, but its odd/even writer states must not.
+        mask = (1 << 32) - 1
+        for sequence in (0, 2, mask - 1):
+            odd_sequence = (sequence + 1) & mask
+            even_sequence = (sequence + 2) & mask
+            self.assertEqual(odd_sequence & 1, 1)
+            self.assertEqual(even_sequence & 1, 0)
+
         self.assertIn("odrive_bridge_get_motion_snapshot(&turns, &velocity_turns_per_second)", self.ffb_task)
         self.assertRegex(
             bridge,
