@@ -28,6 +28,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib build-essential python3 python3-yaml python3-jinja2 python3-jsonschema
 
+    # Run the Force Feedback and firmware safety regressions on every push,
+    # pull request, and version tag before compiling/publishing the firmware.
+    - name: Run firmware regression tests
+      working-directory: ./Odrive-Wheel
+      run: python3 -m unittest discover -s tests -v
+
     # 3. Generate ODrive autogen files
     - name: Generate ODrive autogen files
       working-directory: ./ODrive-fw-v0.5.6/ODrive-fw-v0.5.6/Firmware
