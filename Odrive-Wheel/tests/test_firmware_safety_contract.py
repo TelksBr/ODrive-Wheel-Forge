@@ -189,6 +189,20 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("g_vbus_voltage_scale.store(", setter)
         self.assertNotIn("volatile float g_vbus_voltage_scale", self.ffb_task)
 
+    def test_encoder_index_diagnostics_use_atomic_isr_counters(self):
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        encoder = (odrive_root / "MotorControl" / "encoder.cpp").read_text(encoding="utf-8")
+        for counter in ("g_z_hit_count", "g_z_glitch_count"):
+            self.assertRegex(encoder, rf"std::atomic<uint32_t>\s+{counter}")
+            self.assertIn(f"{counter}.fetch_add(1, std::memory_order_relaxed)", encoder)
+            self.assertNotRegex(encoder, rf"volatile\s+uint32_t\s+{counter}")
+        self.assertIn('extern std::atomic<uint32_t> g_z_hit_count;', self.ffb_task)
+        self.assertIn('extern std::atomic<uint32_t> g_z_glitch_count;', self.ffb_task)
+        self.assertIn("g_z_hit_count.load(std::memory_order_relaxed)", self.ffb_task)
+        self.assertIn("g_z_hit_count.store(v, std::memory_order_relaxed)", self.ffb_task)
+        self.assertIn("g_z_glitch_count.load(std::memory_order_relaxed)", self.ffb_task)
+        self.assertIn("g_z_glitch_count.store(v, std::memory_order_relaxed)", self.ffb_task)
+
     def test_encoder_position_and_velocity_are_published_as_atomic_ffb_snapshots(self):
         odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
         encoder_header = (odrive_root / "MotorControl" / "encoder.hpp").read_text(encoding="utf-8")

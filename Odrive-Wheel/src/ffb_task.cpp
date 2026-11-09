@@ -1620,13 +1620,13 @@ extern "C" void ffb_set_axis_zeroofs(float v) {
 //                   capacitivo, EMI, ruido). Indicador de problema eletrico.
 // Reset via axis.zhits=0 e axis.zglitch=0 (escreve zerando).
 extern "C" {
-extern volatile uint32_t g_z_hit_count;
-extern volatile uint32_t g_z_glitch_count;
+extern std::atomic<uint32_t> g_z_hit_count;
+extern std::atomic<uint32_t> g_z_glitch_count;
 }
-extern "C" uint32_t ffb_get_z_hits(void)     { return g_z_hit_count; }
-extern "C" void     ffb_set_z_hits(uint32_t v)     { g_z_hit_count = v; }
-extern "C" uint32_t ffb_get_z_glitches(void) { return g_z_glitch_count; }
-extern "C" void     ffb_set_z_glitches(uint32_t v) { g_z_glitch_count = v; }
+extern "C" uint32_t ffb_get_z_hits(void)     { return g_z_hit_count.load(std::memory_order_relaxed); }
+extern "C" void     ffb_set_z_hits(uint32_t v)     { g_z_hit_count.store(v, std::memory_order_relaxed); }
+extern "C" uint32_t ffb_get_z_glitches(void) { return g_z_glitch_count.load(std::memory_order_relaxed); }
+extern "C" void     ffb_set_z_glitches(uint32_t v) { g_z_glitch_count.store(v, std::memory_order_relaxed); }
 
 // Live readouts — mapeados pra metric_t do axis
 extern "C" int ffb_get_axis_curtorque(void) {

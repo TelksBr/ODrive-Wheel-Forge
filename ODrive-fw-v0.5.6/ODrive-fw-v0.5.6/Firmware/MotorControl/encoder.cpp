@@ -1,6 +1,7 @@
 
 #include "odrive_main.h"
 #include <Drivers/STM32/stm32_system.h>
+#include <atomic>
 #include <bitset>
 #include <cmsis_os.h>   // osDelay no retry do mt6835_transfer24
 
@@ -25,9 +26,14 @@ extern "C" void odrive_bridge_enc_spi_kick(void);
 // Contadores de diagnostico do callback do Z — expostos via ASCII pelo
 // nosso firmware (axis.zhits?, axis.zglitch?). Vivem aqui como statics
 // pra serem incrementados dentro do callback sem dependencia de instancia.
-// volatile porque sao escritos por ISR e lidos por main loop.
-volatile uint32_t g_z_hit_count = 0;       // pulsos Z aceitos (HIGH no callback)
-volatile uint32_t g_z_glitch_count = 0;    // IRQs rejeitadas (LOW = glitch capacitivo)
+// Atomics because these are incremented by the encoder ISR and read/reset by
+// the serial command task. Keep them lock-free for the interrupt path.
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "Encoder index diagnostics must remain lock-free in the ISR");
+extern "C" {
+std::atomic<uint32_t> g_z_hit_count{0};       // pulsos Z aceitos (HIGH no callback)
+std::atomic<uint32_t> g_z_glitch_count{0};    // IRQs rejeitadas (LOW = glitch capacitivo)
+}
 
 bool Encoder::apply_config(ODriveIntf::MotorIntf::MotorType motor_type) {
     config_.parent = this;
@@ -209,10 +215,10 @@ void Encoder::enc_index_cb() {
         // idle=LOW.
         if (!index_gpio_.read()) {
             // glitch — ignora, NAO desinscreve (continua armado)
-            g_z_glitch_count++;
+            g_z_glitch_count.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        g_z_hit_count++;
+        g_z_hit_count.fetch_add(1, std::memory_order_relaxed);
 
         set_circular_count(0, false);
         if (config_.use_index_offset)
