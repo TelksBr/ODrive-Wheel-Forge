@@ -287,8 +287,10 @@ public:
 
         // Capture both lock-free encoder values before deriving FFB metrics;
         // this keeps their sample age as close as possible at the 1 kHz edge.
-        float turns = odrive_bridge_get_pos_turns();
-        float new_speed = odrive_bridge_get_vel_estimate() * 360.0f;
+        float turns;
+        float velocity_turns_per_second;
+        odrive_bridge_get_motion_snapshot(&turns, &velocity_turns_per_second);
+        float new_speed = velocity_turns_per_second * 360.0f;
         // zeroOffset_ é a posição (em graus) capturada na última chamada de
         // axis.zeroenc!. Subtraindo aqui, todo o pipeline downstream (pos_f,
         // pos_scaled_16b, metrics_.posDegrees, endstops, speed/accel)

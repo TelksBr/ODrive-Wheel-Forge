@@ -280,9 +280,12 @@ void Encoder::set_linear_count(int32_t count) {
 
     // Update states
     shadow_count_ = count;
-    ffb_pos_turns_snapshot_.store(ffb_position_snapshot, std::memory_order_relaxed);
     pos_estimate_counts_ = (float)count;
     tim_cnt_sample_ = count;
+    publish_ffb_motion_snapshot(
+        ffb_position_snapshot,
+        ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed)
+    );
 
     //Write hardware last
     timer_->Instance->CNT = count;
@@ -478,8 +481,14 @@ bool Encoder::run_offset_calibration() {
 
     // We use shadow_count_ to do the calibration, but the offset is used by count_in_cpr_
     // Therefore we have to sync them for calibration
-    shadow_count_ = count_in_cpr_;
-    publish_ffb_position_snapshot();
+    CRITICAL_SECTION() {
+        shadow_count_ = count_in_cpr_;
+        const int32_t cpr = config_.cpr > 0 ? config_.cpr : 10000;
+        publish_ffb_motion_snapshot(
+            (float)shadow_count_ / (float)cpr,
+            ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed)
+        );
+    }
 
     CRITICAL_SECTION() {
         // Reset state variables
@@ -1128,9 +1137,11 @@ bool Encoder::update() {
     // Outputs from Encoder for Controller
     pos_estimate_ = pos_estimate_counts_ / (float)config_.cpr;
     vel_estimate_ = vel_estimate_counts_ / (float)config_.cpr;
-    ffb_vel_estimate_snapshot_.store(vel_estimate_counts_ / (float)config_.cpr,
-                                     std::memory_order_relaxed);
-    publish_ffb_position_snapshot();
+    const int32_t ffb_cpr = config_.cpr > 0 ? config_.cpr : 10000;
+    publish_ffb_motion_snapshot(
+        (float)shadow_count_ / (float)ffb_cpr,
+        vel_estimate_counts_ / (float)ffb_cpr
+    );
     
     // TODO: we should strictly require that this value is from the previous iteration
     // to avoid spinout scenarios. However that requires a proper way to reset

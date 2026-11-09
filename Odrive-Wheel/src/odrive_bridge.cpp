@@ -74,6 +74,13 @@ extern "C" float odrive_bridge_get_pos_turns(void) {
     return axes[0].encoder_.get_ffb_pos_turns_snapshot();
 }
 
+extern "C" void odrive_bridge_get_motion_snapshot(
+    float* position_turns, float* velocity_turns_per_second) {
+    if (position_turns == nullptr || velocity_turns_per_second == nullptr) return;
+    axes[0].encoder_.get_ffb_motion_snapshot(*position_turns,
+                                             *velocity_turns_per_second);
+}
+
 extern "C" void odrive_bridge_set_input_torque(float nm) {
     // Efetivo apenas se axis está em CLOSED_LOOP_CONTROL + control_mode=TORQUE
     // + input_mode=PASSTHROUGH. Fora desses estados, escrita é ignorada pelo

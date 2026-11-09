@@ -15,6 +15,8 @@ class Encoder : public ODriveIntf::EncoderIntf {
 public:
     static_assert(std::atomic<float>::is_always_lock_free,
                   "FFB encoder snapshots must be lock-free in the control loop");
+    static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                  "FFB encoder snapshot sequence must be lock-free");
     static constexpr uint32_t MODE_FLAG_ABS = 0x100;
     static constexpr std::array<float, 6> hall_edge_defaults = 
         {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
@@ -95,10 +97,34 @@ public:
     float get_ffb_vel_estimate_snapshot() const {
         return ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed);
     }
-    void publish_ffb_position_snapshot() {
-        const int32_t cpr = config_.cpr > 0 ? config_.cpr : 10000;
-        ffb_pos_turns_snapshot_.store((float)shadow_count_ / (float)cpr,
-                                      std::memory_order_relaxed);
+
+    // Read position and velocity from one publication. The FFB task can be
+    // delayed across a control ISR, so two independent atomic reads may pair
+    // position from sample N with velocity from sample N+1.
+    void get_ffb_motion_snapshot(float& position_turns,
+                                 float& velocity_turns_per_second) const {
+        for (;;) {
+            const uint32_t sequence_before =
+                ffb_motion_snapshot_sequence_.load(std::memory_order_acquire);
+            if (sequence_before & 1u) continue;
+
+            position_turns = ffb_pos_turns_snapshot_.load(std::memory_order_relaxed);
+            velocity_turns_per_second =
+                ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acq_rel);
+            const uint32_t sequence_after =
+                ffb_motion_snapshot_sequence_.load(std::memory_order_relaxed);
+            if (sequence_before == sequence_after) return;
+        }
+    }
+
+    void publish_ffb_motion_snapshot(float position_turns,
+                                     float velocity_turns_per_second) {
+        ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_acq_rel);
+        ffb_pos_turns_snapshot_.store(position_turns, std::memory_order_relaxed);
+        ffb_vel_estimate_snapshot_.store(velocity_turns_per_second,
+                                         std::memory_order_relaxed);
+        ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_release);
     }
 
     TIM_HandleTypeDef* timer_;
@@ -117,6 +143,7 @@ public:
     int32_t shadow_count_ = 0;
     std::atomic<float> ffb_pos_turns_snapshot_{0.0f};
     std::atomic<float> ffb_vel_estimate_snapshot_{0.0f};
+    std::atomic<uint32_t> ffb_motion_snapshot_sequence_{0};
     int32_t count_in_cpr_ = 0;
     float interpolation_ = 0.0f;
     OutputPort<float> phase_ = 0.0f;     // [rad]

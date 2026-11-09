@@ -212,11 +212,10 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("std::atomic<float> ffb_pos_turns_snapshot_", encoder_header)
         self.assertIn("std::atomic<float> ffb_vel_estimate_snapshot_", encoder_header)
         self.assertIn("std::atomic<float>::is_always_lock_free", encoder_header)
+        self.assertIn("std::atomic<uint32_t> ffb_motion_snapshot_sequence_", encoder_header)
         self.assertIn("ffb_pos_turns_snapshot_.load(std::memory_order_relaxed)", encoder_header)
         self.assertIn("ffb_vel_estimate_snapshot_.load(std::memory_order_relaxed)", encoder_header)
-        self.assertIn("publish_ffb_position_snapshot()", encoder)
-        self.assertIn("ffb_vel_estimate_snapshot_.store(vel_estimate_counts_ / (float)config_.cpr", encoder)
-        self.assertEqual(encoder.count("publish_ffb_position_snapshot();"), 2)
+        self.assertEqual(encoder.count("publish_ffb_motion_snapshot("), 3)
         set_linear_count = encoder.split("void Encoder::set_linear_count", 1)[1].split(
             "void Encoder::set_circular_count", 1
         )[0]
@@ -224,21 +223,62 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             set_linear_count.index("const float ffb_position_snapshot"),
             set_linear_count.index("cpu_enter_critical()"),
         )
-        self.assertIn("ffb_pos_turns_snapshot_.store(ffb_position_snapshot", set_linear_count)
-        self.assertLess(
-            encoder.index("ffb_vel_estimate_snapshot_.store("),
-            encoder.index("publish_ffb_position_snapshot();", encoder.index("ffb_vel_estimate_snapshot_.store(")),
-        )
+        self.assertLess(set_linear_count.index("cpu_enter_critical()"),
+                        set_linear_count.index("publish_ffb_motion_snapshot("))
         self.assertNotIn("int32_t cnt = axes[0].encoder_.shadow_count_", bridge)
         self.assertNotIn("encoder_.vel_estimate_.any()", bridge)
         self.assertIn("encoder_.get_ffb_pos_turns_snapshot()", bridge)
         self.assertIn("encoder_.get_ffb_vel_estimate_snapshot()", bridge)
+        self.assertIn("encoder_.get_ffb_motion_snapshot(*position_turns", bridge)
         axis_update = self.ffb_task.split("void update()", 1)[1].split("void zeroEncoder()", 1)[0]
-        position_read = axis_update.index("float turns = odrive_bridge_get_pos_turns()")
-        velocity_read = axis_update.index("float new_speed = odrive_bridge_get_vel_estimate()")
+        snapshot_read = axis_update.index("odrive_bridge_get_motion_snapshot(&turns, &velocity_turns_per_second)")
         derived_position = axis_update.index("float degrees = turns * 360.0f")
-        self.assertLess(position_read, velocity_read)
-        self.assertLess(velocity_read, derived_position)
+        self.assertLess(snapshot_read, derived_position)
+
+    def test_ffb_axis_reads_position_and_velocity_as_one_encoder_snapshot(self):
+        bridge = (ROOT / "src" / "odrive_bridge.cpp").read_text(encoding="utf-8")
+        odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"
+        encoder_header = (odrive_root / "MotorControl" / "encoder.hpp").read_text(encoding="utf-8")
+        encoder = (odrive_root / "MotorControl" / "encoder.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("get_ffb_motion_snapshot(float& position_turns,", encoder_header)
+        self.assertIn("ffb_motion_snapshot_sequence_", encoder_header)
+        self.assertIn("if (sequence_before == sequence_after) return;", encoder_header)
+        snapshot_reader = function_body(
+            encoder_header,
+            "void get_ffb_motion_snapshot(float& position_turns,",
+        )
+        reader_order = (
+            "sequence_before =",
+            "if (sequence_before & 1u) continue;",
+            "position_turns = ffb_pos_turns_snapshot_.load",
+            "velocity_turns_per_second =",
+            "std::atomic_thread_fence(std::memory_order_acq_rel)",
+            "sequence_after =",
+            "if (sequence_before == sequence_after) return;",
+        )
+        reader_positions = [snapshot_reader.index(item) for item in reader_order]
+        self.assertEqual(reader_positions, sorted(reader_positions))
+        snapshot_writer = function_body(
+            encoder_header,
+            "void publish_ffb_motion_snapshot(float position_turns,",
+        )
+        first_write = snapshot_writer.index("ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_acq_rel)")
+        position_write = snapshot_writer.index("ffb_pos_turns_snapshot_.store(position_turns")
+        velocity_write = snapshot_writer.index("ffb_vel_estimate_snapshot_.store(velocity_turns_per_second")
+        final_publish = snapshot_writer.index("ffb_motion_snapshot_sequence_.fetch_add(1, std::memory_order_release)")
+        self.assertLess(first_write, position_write)
+        self.assertLess(position_write, velocity_write)
+        self.assertLess(velocity_write, final_publish)
+        self.assertIn("odrive_bridge_get_motion_snapshot(&turns, &velocity_turns_per_second)", self.ffb_task)
+        self.assertRegex(
+            bridge,
+            r"get_ffb_motion_snapshot\(\*position_turns,\s*\*velocity_turns_per_second\)",
+        )
+        self.assertIn("publish_ffb_motion_snapshot(", encoder)
+        axis_update = self.ffb_task.split("void update()", 1)[1].split("void zeroEncoder()", 1)[0]
+        self.assertNotIn("odrive_bridge_get_pos_turns()", axis_update)
+        self.assertNotIn("odrive_bridge_get_vel_estimate()", axis_update)
 
     def test_hid_torque_telemetry_uses_a_lock_free_controller_snapshot(self):
         odrive_root = ROOT.parent / "ODrive-fw-v0.5.6" / "ODrive-fw-v0.5.6" / "Firmware"

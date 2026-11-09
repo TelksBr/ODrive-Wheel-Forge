@@ -15,6 +15,9 @@ void odrive_bridge_init(void);
 
 // Posicao absoluta do encoder em voltas. 0.0 se estimativa indisponivel.
 float odrive_bridge_get_pos_turns(void);
+// Coherent encoder position/velocity pair from a single control-loop publish.
+void odrive_bridge_get_motion_snapshot(float* position_turns,
+                                       float* velocity_turns_per_second);
 
 // Escreve setpoint de torque (Nm) em axes[0].controller_.input_torque_.
 // Sem motor armado a ODrive ignora — seguro chamar sempre.
