@@ -483,14 +483,14 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_effect_start_and_ramp_elapsed_use_wrap_safe_millisecond_clock(self):
         self.assertIn("(int32_t)elapsed_ms < 0", self.effects)
-        noncondition = self.effects.split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
             "int32_t EffectsCalculator::calcComponentForce", 1
         )[0]
         self.assertIn("const uint32_t elapsed_ms = now_ms - effect->startTime", noncondition)
         self.assertNotIn("micros() / 1000.0f", self.effects)
 
     def test_ramp_envelope_shapes_attack_and_fade_without_changing_sustain(self):
-        noncondition = self.effects.split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
             "int32_t EffectsCalculator::calcComponentForce", 1
         )[0]
         ramp = noncondition.split("case FFB_EFFECT_RAMP:", 1)[1].split(
@@ -544,9 +544,26 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertEqual(expected_ramp(0, *reverse), 5000)
         self.assertEqual(expected_ramp(1000, *reverse), -3000)
 
+    def test_low_magnitude_ramp_keeps_fractional_sample_interpolation(self):
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
+            "float EffectsCalculator::calcComponentForce", 1
+        )[0]
+        ramp = noncondition.split("case FFB_EFFECT_RAMP:", 1)[1].split(
+            "case FFB_EFFECT_SQUARE:", 1
+        )[0]
+        self.assertIn("auto ramp_level_at", ramp)
+        self.assertIn("-> float", ramp)
+
+        # A one-count ramp over 4 ms advances by 0.25 count each 1 kHz sample;
+        # integer interpolation held it at zero until the final sample.
+        old_level = (1 * 1) // 4
+        interpolated_level = 1.0 * 1 / 4
+        self.assertEqual(old_level, 0)
+        self.assertEqual(interpolated_level, 0.25)
+
     def test_start_delay_is_honored_for_infinite_effects(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
-            "int32_t EffectsCalculator::calcNonConditionEffectForce", 1
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
         delay_guard = calculate.index("(int32_t)elapsed_ms < 0")
         finite_duration_guard = calculate.index(
@@ -556,12 +573,12 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_all_effects_in_one_sample_share_the_same_tick_snapshot(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
-            "int32_t EffectsCalculator::calcNonConditionEffectForce", 1
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
-        noncondition = self.effects.split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
             "int32_t EffectsCalculator::calcComponentForce", 1
         )[0]
-        envelope = self.effects.split("int32_t EffectsCalculator::getEnvelopeMagnitude", 1)[1].split(
+        envelope = self.effects.split("float EffectsCalculator::getEnvelopeMagnitude", 1)[1].split(
             "void EffectsCalculator::setFilters", 1
         )[0]
 
@@ -573,7 +590,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_finite_effect_expires_at_its_duration_boundary(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
-            "int32_t EffectsCalculator::calcNonConditionEffectForce", 1
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
         self.assertIn("const uint32_t elapsed_ms = now_ms - effect->startTime", calculate)
         self.assertIn("elapsed_ms >= effect->duration", calculate)
@@ -583,7 +600,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             "void HidFFB::set_envelope", 1
         )[0]
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
-            "int32_t EffectsCalculator::calcNonConditionEffectForce", 1
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
         self.assertIn("effects[id].loopsRemaining = report->loopCount", operation)
         self.assertIn("FFB_EFFECT_LOOP_INFINITE", self.defs)
@@ -608,7 +625,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
 
     def test_loop_count_catches_up_all_cycles_after_a_delayed_sample(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
-            "int32_t EffectsCalculator::calcNonConditionEffectForce", 1
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
         self.assertIn("const uint32_t completed_cycles = elapsed_ms / effect->duration", calculate)
         self.assertIn("effect->loopsRemaining > completed_cycles", calculate)
@@ -628,11 +645,47 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertEqual((now - next_start) & mask, 3)
 
     def test_envelope_times_cannot_underflow_duration_or_overflow_interpolation(self):
-        envelope = self.effects.split("int32_t EffectsCalculator::getEnvelopeMagnitude", 1)[1].split("void EffectsCalculator::setFilters", 1)[0]
+        envelope = self.effects.split("float EffectsCalculator::getEnvelopeMagnitude", 1)[1].split("void EffectsCalculator::setFilters", 1)[0]
         self.assertIn("std::min(effect->attackTime, duration)", envelope)
         self.assertIn("std::min(effect->fadeTime, duration)", envelope)
         self.assertIn("int64_t", envelope)
         self.assertNotIn("effect->duration - effect->fadeTime", envelope)
+
+    def test_low_magnitude_envelopes_preserve_fractional_attack_levels(self):
+        envelope = function_body(
+            self.effects,
+            "float EffectsCalculator::getEnvelopeMagnitude(",
+        )
+        self.assertIn("float scaler", envelope)
+        self.assertIn("scaler = attack_level + (magnitude - attack_level)", envelope)
+        self.assertIn("(float)elapsed_time / (float)attack_time", envelope)
+
+        # A one-count effect attacking from zero over 4 ms previously stayed
+        # at zero for the first three 1 kHz samples due to integer division.
+        old_levels = [(1 * elapsed) // 4 for elapsed in (1, 2, 3)]
+        new_levels = [elapsed / 4.0 for elapsed in (1, 2, 3)]
+        self.assertEqual(old_levels, [0, 0, 0])
+        self.assertEqual(new_levels, [0.25, 0.5, 0.75])
+
+    def test_float_accumulator_remains_subcount_accurate_for_40_effects(self):
+        calculate = function_body(self.effects, "void EffectsCalculator::calculateEffects(")
+        self.assertIn("float forces[MAX_AXIS]", calculate)
+        self.assertIn("forces[axis] += statsForceScaled", calculate)
+
+        import struct
+
+        def f32(value):
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+
+        effects = [f32(65534.125)] * 20 + [f32(-65534.0)] * 20
+        for gain in (127, 128, 243):
+            scale = f32(f32(gain) / f32(255.0))
+            exact = sum(float(effect) * float(scale) for effect in effects)
+            accumulated = f32(0.0)
+            for effect in effects:
+                accumulated = f32(accumulated + f32(effect * scale))
+            self.assertLess(abs(float(accumulated) - exact), 1.0)
+            self.assertEqual(int(accumulated), int(exact))
 
     def test_friction_keeps_signed_condition_coefficients(self):
         friction = self.effects.split("case FFB_EFFECT_FRICTION", 1)[1].split("case FFB_EFFECT_DAMPER", 1)[0]
@@ -643,13 +696,13 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("fabsf(speed - (float)offset)", friction)
 
     def test_condition_deadband_comparison_keeps_fractional_metric(self):
-        condition = self.effects.split("int32_t EffectsCalculator::calcConditionEffectForce", 1)[1].split("int32_t EffectsCalculator::getEnvelopeMagnitude", 1)[0]
+        condition = self.effects.split("float EffectsCalculator::calcConditionEffectForce", 1)[1].split("float EffectsCalculator::getEnvelopeMagnitude", 1)[0]
         self.assertIn("fabsf(metric - (float)offset)", condition)
         self.assertNotIn("abs(metric - offset)", condition)
 
     def test_conditional_and_friction_gains_silence_zero_and_preserve_legacy_levels(self):
-        condition = self.effects.split("int32_t EffectsCalculator::calcConditionEffectForce", 1)[1].split(
-            "int32_t EffectsCalculator::getEnvelopeMagnitude", 1
+        condition = self.effects.split("float EffectsCalculator::calcConditionEffectForce", 1)[1].split(
+            "float EffectsCalculator::getEnvelopeMagnitude", 1
         )[0]
         friction = self.effects.split("case FFB_EFFECT_FRICTION", 1)[1].split(
             "case FFB_EFFECT_DAMPER", 1
@@ -769,7 +822,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertLess(calculate_at, commit_at)
 
     def test_hid_effect_updates_and_1khz_calculation_share_a_mutex(self):
-        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[0]
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split("float EffectsCalculator::calcNonConditionEffectForce", 1)[0]
         hid_out = self.hid.split("void HidFFB::hidOut", 1)[1].split("uint16_t HidFFB::hidGet", 1)[0]
         thread = self.ffb_task.split("static void ffb_thread", 1)[1].split("// -------------------- Init", 1)[0]
         self.assertIn("EffectsStateGuard", self.effects_header)
@@ -874,7 +927,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertLess(publish, spawn)
 
     def test_effect_loop_advances_axis_slew_only_once_per_1khz_sample(self):
-        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split("int32_t EffectsCalculator::calcNonConditionEffectForce", 1)[0]
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split("float EffectsCalculator::calcNonConditionEffectForce", 1)[0]
         initial_axis_pass = calculate.split("if(!isActive())", 1)[0]
         self.assertNotIn("axis->setEffectTorque(0)", initial_axis_pass)
         inactive_path = calculate.split("if(!isActive())", 1)[1].split("int32_t force = 0", 1)[0]
@@ -927,6 +980,72 @@ class FirmwareSafetyContractTests(unittest.TestCase):
             reference = math.sin(2.0 * math.pi * sample / 65536.0)
             max_error_counts = max(max_error_counts, abs(estimate - reference) * 32767.0)
         self.assertLess(max_error_counts, 0.7)
+
+    def test_global_gain_preserves_precision_across_simultaneous_effects(self):
+        calculate = function_body(self.effects, "void EffectsCalculator::calculateEffects(")
+        component = function_body(self.effects, "float EffectsCalculator::calcComponentForce(")
+        noncondition = function_body(
+            self.effects,
+            "float EffectsCalculator::calcNonConditionEffectForce(",
+        )
+        condition = function_body(
+            self.effects,
+            "float EffectsCalculator::calcConditionEffectForce(",
+        )
+
+        self.assertNotIn("result_torque * global_gain", component)
+        self.assertIn(
+            "float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVector",
+            self.effects,
+        )
+        self.assertIn("float force_vector = 0.0f", noncondition)
+        self.assertIn("force_vector = effect->offset + sine", noncondition)
+        self.assertNotIn("(int32_t)(effect->offset + sine)", noncondition)
+        self.assertIn(
+            "return force_vector * ((float)effect->gain / 255.0f)",
+            noncondition,
+        )
+        self.assertIn("float force", condition)
+        self.assertIn("clip<float, float>", condition)
+        self.assertIn("float force = 0.0f", component)
+        self.assertEqual(component.count("float force_raw ="), 3)
+        self.assertNotIn("int32_t force_raw = calcConditionEffectForce", component)
+        filters_header = (ROOT / "inc" / "Filters.h").read_text(encoding="utf-8")
+        self.assertIn("float process(float in)", filters_header)
+        self.assertIn("const float globalGainScale =", calculate)
+        self.assertEqual(calculate.count("/ 255.0f"), 1)
+        self.assertLess(
+            calculate.index("const float globalGainScale ="),
+            calculate.index("for (uint8_t fxi = 0;"),
+        )
+        self.assertIn("float forces[MAX_AXIS]", calculate)
+        self.assertIn("const float statsForceScaled = axisforce * globalGainScale", calculate)
+        self.assertIn("forces[axis] += statsForceScaled", calculate)
+        summed_output = calculate.split("// Clip the globally scaled sum", 1)[1]
+        self.assertRegex(
+            summed_output,
+            r"clip<float, float>\(forces\[i\], -32767\.0f, 32767\.0f\)",
+        )
+
+        # Three simultaneous one-count effects at 50% gain should combine
+        # before integer quantization: per-effect scaling loses all three.
+        effects = [1, 1, 1]
+        gain = 128
+        old_output = sum((effect * gain) // 255 for effect in effects)
+        corrected_output = (sum(effects) * gain) // 255
+        self.assertEqual(old_output, 0)
+        self.assertEqual(corrected_output, 1)
+
+        # Preserve fractions from directional scaling too: each 0.8-count
+        # effect used to truncate to zero before the three effects were summed.
+        for weak_effects, expected in (
+            ([0.8, 0.8, 0.8], 1),
+            ([-0.8, -0.8, -0.8], -1),
+        ):
+            old_fractional_output = sum(int(effect) for effect in weak_effects)
+            corrected_fractional_output = int(sum(weak_effects) * gain / 255)
+            self.assertEqual(old_fractional_output, 0)
+            self.assertEqual(corrected_fractional_output, expected)
 
     def test_ramp_levels_decode_signed_hid_torque(self):
         ramp = self.defs.split("} __attribute__((packed)) FFB_SetRamp_Data_t;", 1)[0].rsplit("typedef struct", 1)[1]

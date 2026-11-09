@@ -202,11 +202,11 @@ private:
 	bool isMonitorEffect = false;
 	cpp_freertos::MutexStandard effects_state_mutex_;
 
-	int32_t calcComponentForce(FFB_Effect *effect, int32_t forceVector, std::vector<std::unique_ptr<Axis>> &axes, uint8_t axis);
-	int32_t calcNonConditionEffectForce(FFB_Effect* effect, uint32_t now_ms);
+	float calcComponentForce(FFB_Effect *effect, float forceVector, std::vector<std::unique_ptr<Axis>> &axes, uint8_t axis);
+	float calcNonConditionEffectForce(FFB_Effect* effect, uint32_t now_ms);
 	float speedRampupPct();
-	int32_t calcConditionEffectForce(FFB_Effect *effect, float metric, uint8_t gain, uint8_t idx, float scale, float angle_ratio);
-	int32_t getEnvelopeMagnitude(FFB_Effect *effect, uint32_t now_ms);
+	float calcConditionEffectForce(FFB_Effect *effect, float metric, uint8_t gain, uint8_t idx, float scale, float angle_ratio);
+	float getEnvelopeMagnitude(FFB_Effect *effect, uint32_t now_ms);
 	std::string listEffectsUsed(bool details = false,uint8_t axis = 0);
 	//std::string listForceEffects();
 	void checkFilterCoeff(biquad_constant_t *filter, uint32_t freq,uint8_t q);
