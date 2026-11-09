@@ -19,7 +19,7 @@ jobs:
     steps:
     # 1. Checkout the repository and its submodules with full history for versioning
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         submodules: recursive
         fetch-depth: 0
@@ -68,14 +68,14 @@ jobs:
     # 5. Upload build log if something failed
     - name: Upload build log
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: odrive-wheel-build-log
         path: ./Odrive-Wheel/build.log
 
     # 6. Upload the compiled binary as an artifact
     - name: Upload Firmware Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: odrive-wheel-firmware
         path: ./Odrive-Wheel/build/odrive-wheel.bin
@@ -84,7 +84,7 @@ jobs:
     # 7. Create GitHub Release if pushed with a version tag
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         files: |
           ./Odrive-Wheel/build/odrive-wheel.bin
