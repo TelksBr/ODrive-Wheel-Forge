@@ -483,7 +483,13 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("(s_axis_raw->maxTorque_Nm_ * s_axis_raw->fxRatio_)", self.ffb_task)
 
     def test_effect_start_and_ramp_elapsed_use_wrap_safe_millisecond_clock(self):
-        self.assertIn("(int32_t)elapsed_ms < 0", self.effects)
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
+        )[0]
+        self.assertIn("effect->startDelayPending", calculate)
+        self.assertIn("const uint32_t delay_elapsed_ms = now_ms - effect->startTime", calculate)
+        self.assertIn("delay_elapsed_ms < effect->pendingStartDelay", calculate)
+        self.assertNotIn("(int32_t)elapsed_ms < 0", calculate)
         noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1].split(
             "int32_t EffectsCalculator::calcComponentForce", 1
         )[0]
@@ -566,11 +572,74 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
             "float EffectsCalculator::calcNonConditionEffectForce", 1
         )[0]
-        delay_guard = calculate.index("(int32_t)elapsed_ms < 0")
+        delay_guard = calculate.index("delay_elapsed_ms < effect->pendingStartDelay")
         finite_duration_guard = calculate.index(
             "effect->duration != FFB_EFFECT_DURATION_INFINITE && effect->duration != 0"
         )
         self.assertLess(delay_guard, finite_duration_guard)
+
+    def test_changing_effect_type_does_not_reset_a_running_effect_clock(self):
+        set_effect = self.hid.split("void HidFFB::set_effect(", 1)[1].split(
+            "void HidFFB::set_condition", 1
+        )[0]
+        self.assertNotIn("effect_p->startTime = 0", set_effect)
+
+        # A type update during a pending start delay must not move its original
+        # deadline back to boot time, where it could appear already expired.
+        start_tick = 1000
+        now_tick = 1020
+        delay_ms = 100
+        self.assertLess(now_tick - start_tick, delay_ms)
+        self.assertGreaterEqual(now_tick - 0, delay_ms)
+
+    def test_infinite_effect_does_not_reenter_delay_after_int32_half_wrap(self):
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
+        )[0]
+        self.assertIn("effect->startDelayPending = false", calculate)
+        self.assertNotIn("(int32_t)elapsed_ms < 0", calculate)
+
+        # After 2^31 ms, the old signed elapsed test became negative again and
+        # incorrectly treated a long-running effect as waiting for startDelay.
+        elapsed_ms = 1 << 31
+        signed_elapsed_ms = elapsed_ms - (1 << 32)
+        start_delay_ms = 500
+        self.assertLess(signed_elapsed_ms, 0)
+        self.assertGreater(elapsed_ms, start_delay_ms)
+
+    def test_start_delay_is_consumed_once_across_tick_wrap_and_long_uptime(self):
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
+        )[0]
+        operation = self.hid.split("void HidFFB::set_effect_operation", 1)[1].split(
+            "void HidFFB::set_envelope", 1
+        )[0]
+        self.assertIn("effects[id].startTime = start_tick", operation)
+        self.assertIn("effects[id].startDelayPending = effects[id].pendingStartDelay != 0", operation)
+        self.assertIn("effects[id].pendingStartDelay = effects[id].startDelay", operation)
+        self.assertIn("effect->startTime += effect->pendingStartDelay", calculate)
+        self.assertIn("delay_elapsed_ms < effect->pendingStartDelay", calculate)
+
+        # A Set Effect update after Start changes the configured delay for the
+        # next operation; it must not move the current operation's deadline.
+        pending_delay_ms = 100
+        updated_configured_delay_ms = 500
+        self.assertLess(1020 - 1000, pending_delay_ms)
+        self.assertNotEqual(pending_delay_ms, updated_configured_delay_ms)
+
+        mask = (1 << 32) - 1
+        start_tick = 0xFFFFFFF0
+        delay_ms = 32
+        before_delay_end = (start_tick + delay_ms - 1) & mask
+        delay_end = (start_tick + delay_ms) & mask
+        self.assertEqual((before_delay_end - start_tick) & mask, delay_ms - 1)
+        self.assertEqual((delay_end - start_tick) & mask, delay_ms)
+
+        effective_start = (start_tick + delay_ms) & mask
+        self.assertEqual((delay_end - effective_start) & mask, 0)
+        long_uptime_tick = (effective_start + (1 << 31)) & mask
+        self.assertEqual((long_uptime_tick - effective_start) & mask, 1 << 31)
+        # Once the delay is consumed, the active effect is never checked against it again.
 
     def test_all_effects_in_one_sample_share_the_same_tick_snapshot(self):
         calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
@@ -595,6 +664,79 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         )[0]
         self.assertIn("const uint32_t elapsed_ms = now_ms - effect->startTime", calculate)
         self.assertIn("elapsed_ms >= effect->duration", calculate)
+
+    def test_pid_pause_freezes_effect_timeline_and_continue_resumes_from_same_phase(self):
+        control = function_body(self.hid, "void HidFFB::ffb_control")
+        pause_impl = function_body(self.effects, "void EffectsCalculator::setPaused")
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
+        )[0]
+        operation = function_body(self.hid, "void HidFFB::set_effect_operation")
+
+        self.assertIn("effects_calc->setPaused(true)", control)
+        self.assertIn("effects_calc->setPaused(false)", control)
+        self.assertIn("effects_calc->noteEffectStartedWhilePaused", self.hid)
+        self.assertIn("effect.startTime += paused_ms", pause_impl)
+        self.assertIn("effect.phaseLastTick += paused_ms", pause_impl)
+        self.assertIn("effects_paused_", calculate)
+        self.assertIn("noteEffectStartedWhilePaused(&effects[id], start_tick)", operation)
+
+        # A 100 ms effect paused 25 ms after start for 10 seconds must resume
+        # with 75 ms left, and a periodic phase must not advance during pause.
+        start_ms = 100
+        pause_ms = 125
+        resume_ms = 10_125
+        adjusted_start_ms = start_ms + (resume_ms - pause_ms)
+        self.assertEqual(resume_ms - adjusted_start_ms, 25)
+
+        period_ms = 80
+        phase_at_pause_ms = (pause_ms - start_ms) % period_ms
+        phase_after_resume_ms = phase_at_pause_ms + ((resume_ms - resume_ms) % period_ms)
+        self.assertEqual(phase_after_resume_ms, 25)
+
+        mask = (1 << 32) - 1
+        pause_start_tick = 0xFFFFFFF0
+        resume_tick = 0x00000020
+        paused_ms = (resume_tick - pause_start_tick) & mask
+        effect_start_tick = (pause_start_tick - 10) & mask
+        shifted_start_tick = (effect_start_tick + paused_ms) & mask
+        self.assertEqual((resume_tick - shifted_start_tick) & mask, 10)
+
+    def test_pid_reset_clears_pause_and_reenables_actuators(self):
+        control = function_body(self.hid, "void HidFFB::ffb_control")
+        reset = control.split("if(cmd & 0x08)", 1)[1].split("if(cmd & 0x10)", 1)[0]
+        start_ffb = function_body(self.hid, "void HidFFB::start_FFB")
+
+        self.assertIn("effects_calc->setPaused(false)", reset)
+        self.assertLess(reset.index("reset_ffb()"), reset.index("start_FFB()"))
+        self.assertIn("if (effects_calc->isPaused() || !actuators_enabled) return", start_ffb)
+
+    def test_pid_state_report_tracks_pause_actuator_and_effect_states_independently(self):
+        status_update = function_body(self.hid, "void HidFFB::updateStatusReport")
+        send_status = function_body(self.hid, "void HidFFB::sendStatusReport")
+        get_state = self.hid.split("case HID_ID_STATE:", 1)[1].split("case HID_ID_BLKLDREP:", 1)[0]
+        control = function_body(self.hid, "void HidFFB::ffb_control")
+        operation = function_body(self.hid, "void HidFFB::set_effect_operation")
+
+        self.assertIn("updateStatusReport()", send_status)
+        self.assertIn("updateStatusReport()", get_state)
+        self.assertIn("HID_EFFECT_PAUSE", status_update)
+        self.assertIn("actuators_enabled", status_update)
+        self.assertIn("effect.state != 0 && !effect.startDelayPending", status_update)
+        self.assertIn("sendStatusReport(0)", control)
+        self.assertIn("sendStatusReport(report->effectBlockIndex)", operation)
+        self.assertIn("actuators_enabled = false", control)
+        self.assertIn("actuators_enabled = true", control)
+
+        # PID state bits: power, actuators enabled, paused and playing are
+        # independent signals, rather than aliases for ffb_active.
+        power, enabled, paused, playing = 0x08, 0x02, 0x01, 0x10
+        paused_status = power | enabled | paused
+        running_status = power | enabled | playing
+        disabled_status = power
+        self.assertEqual(paused_status, 0x0B)
+        self.assertEqual(running_status, 0x1A)
+        self.assertEqual(disabled_status, 0x08)
 
     def test_effect_operation_loop_count_repeats_finite_effects(self):
         operation = self.hid.split("void HidFFB::set_effect_operation", 1)[1].split(
@@ -778,7 +920,7 @@ class FirmwareSafetyContractTests(unittest.TestCase):
     def test_axis_acceleration_and_slew_use_measured_sample_interval(self):
         update = self.ffb_task.split("void update()", 1)[1].split("void zeroEncoder()", 1)[0]
         setter = self.ffb_task.split("void setEffectTorque(int32_t torque) override", 1)[1].split("void calculateAxisEffects", 1)[0]
-        self.assertIn("uint32_t elapsed_us = hasLastUpdate_ ? sample_time_us - lastUpdateUs_ : 1000u", update)
+        self.assertIn("uint32_t elapsed_us = had_previous_speed ? sample_time_us - lastUpdateUs_ : 1000u", update)
         self.assertIn("dtSeconds_ = (float)elapsed_us * 0.000001f", update)
         self.assertIn("const float dt = dtSeconds_", update)
         self.assertIn("dt / (dt + accelFilterTauSeconds_)", update)
@@ -789,6 +931,29 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         # deg/s². The old fixed-1ms derivative doubled the inertia input.
         self.assertEqual((120.0 - 100.0) / 0.002, 10000.0)
         self.assertEqual((120.0 - 100.0) / 0.001, 20000.0)
+
+    def test_first_velocity_sample_does_not_create_an_inertia_impulse(self):
+        update = self.ffb_task.split("void update()", 1)[1].split("void zeroEncoder()", 1)[0]
+        previous_speed_snapshot = update.index("const bool had_previous_speed = hasLastUpdate_")
+        mark_sampled = update.index("hasLastUpdate_ = true")
+        self.assertLess(previous_speed_snapshot, mark_sampled)
+        self.assertIn(
+            "const float raw_accel = had_previous_speed ? (new_speed - metrics_.speed) / dt : 0.0f",
+            update,
+        )
+
+        # At startup, 360 deg/s is a speed measurement, not evidence of a
+        # 360,000 deg/s² acceleration. The old first-sample derivative drove
+        # the inertia term into its 10,000-count clamp immediately.
+        first_speed_deg_s = 360.0
+        assumed_first_dt_s = 0.001
+        old_raw_accel = first_speed_deg_s / assumed_first_dt_s
+        first_sample_accel = 0.0
+        self.assertEqual(old_raw_accel, 360000.0)
+        self.assertEqual(first_sample_accel, 0.0)
+        old_accel_lpf = assumed_first_dt_s / (assumed_first_dt_s + 0.00159154943) * old_raw_accel
+        old_inertia_counts = old_accel_lpf * 100 * 0.0078125
+        self.assertGreater(old_inertia_counts, 10000.0)
         self.assertEqual((0x000006D0 - 0xFFFFFF00) & 0xFFFFFFFF, 2000)
 
     def test_negative_expo_uses_the_requested_power_curve(self):
@@ -1084,7 +1249,8 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("uint16_t period = 1", self.defs)
         self.assertIn("uint32_t period_ms = effect->period", self.effects)
         self.assertNotIn("std::max<uint32_t>", self.effects)
-        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1]
+        periodic = noncondition.split("uint32_t period_ms =", 1)[1].split(
             "if (effect->type == FFB_EFFECT_SQUARE)", 1
         )[0]
         self.assertIn("const uint32_t phase_centidegrees = effect->phase", periodic)
@@ -1092,10 +1258,13 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertIn("(phase_centidegrees * period_ms) / 36u", periodic)
         self.assertNotIn("uint64_t", periodic)
         self.assertIn("effect->phase = (uint16_t)(report->phase % 36000u)", self.hid)
-        self.assertIn("effect->period = clip<uint32_t,uint32_t>(report->period,1,0x7fff)", self.hid)
+        self.assertIn("const uint16_t new_period = clip<uint32_t,uint32_t>(report->period,1,0x7fff)", self.hid)
+        self.assertIn("effect->phaseElapsedMs = (uint16_t)", self.hid)
+        self.assertIn("new_period / old_period", self.hid)
 
     def test_periodic_cycle_fold_uses_one_conditional_subtract(self):
-        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1]
+        periodic = noncondition.split("uint32_t period_ms =", 1)[1].split(
             "if (effect->type == FFB_EFFECT_SQUARE)", 1
         )[0]
         self.assertIn("uint32_t cycle_pos_us = elapsed_phase_us + phase_us", periodic)
@@ -1121,7 +1290,8 @@ class FirmwareSafetyContractTests(unittest.TestCase):
                     self.assertLess(summed_phase_us, 1 << 32)
 
     def test_periodic_phase_normalization_uses_cached_reciprocal_with_bounded_error(self):
-        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split(
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1]
+        periodic = noncondition.split("uint32_t period_ms =", 1)[1].split(
             "if (effect->type == FFB_EFFECT_SQUARE)", 1
         )[0]
         set_periodic = self.hid.split("void HidFFB::set_periodic(", 1)[1].split(
@@ -1317,8 +1487,9 @@ class FirmwareSafetyContractTests(unittest.TestCase):
                 self.assertLess(optimized_phase_us, period_us)
 
     def test_periodic_phase_does_not_jump_when_micros_wraps(self):
-        periodic = self.effects.split("uint32_t period_ms =", 1)[1].split("if (effect->type == FFB_EFFECT_SQUARE)", 1)[0]
-        self.assertIn("elapsed_ms % period_ms", periodic)
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1]
+        periodic = noncondition.split("uint32_t period_ms =", 1)[1].split("if (effect->type == FFB_EFFECT_SQUARE)", 1)[0]
+        self.assertIn("effect->phaseElapsedMs", periodic)
         self.assertNotIn("micros() - ((uint32_t)effect->startTime * 1000)", periodic)
 
         # After one micros() wrap plus 1.234567 s, a 7 ms effect must be at
@@ -1335,6 +1506,32 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertLessEqual(abs(tick_phase - expected_phase), 1000)
         self.assertEqual(old_phase, 2567)
         self.assertGreater(abs(old_phase - expected_phase), 1000)
+
+    def test_infinite_periodic_phase_survives_full_millisecond_tick_wrap(self):
+        noncondition = self.effects.split("float EffectsCalculator::calcNonConditionEffectForce", 1)[1]
+        periodic = noncondition.split("uint32_t period_ms =", 1)[1].split(
+            "if (effect->type == FFB_EFFECT_SQUARE)", 1
+        )[0]
+        calculate = self.effects.split("void EffectsCalculator::calculateEffects", 1)[1].split(
+            "float EffectsCalculator::calcNonConditionEffectForce", 1
+        )[0]
+        self.assertIn("effect->phaseElapsedMs", periodic)
+        self.assertIn("effect->phaseLastTick", calculate)
+        self.assertIn("elapsed_since_phase_tick_ms % period_ms", calculate)
+
+        mask = (1 << 32) - 1
+        period_ms = 100
+        tick_before_wrap = mask - 1
+        tick_after_wrap = 0
+        phase_before_wrap = tick_before_wrap % period_ms
+        elapsed_since_sample = (tick_after_wrap - tick_before_wrap) & mask
+        phase_after_wrap = (phase_before_wrap + elapsed_since_sample) % period_ms
+        old_phase_after_wrap = tick_after_wrap % period_ms
+
+        self.assertEqual(phase_before_wrap, 94)
+        self.assertEqual(elapsed_since_sample, 2)
+        self.assertEqual(phase_after_wrap, 96)
+        self.assertEqual(old_phase_after_wrap, 0)
 
     def test_endstop_damper_remains_active_when_spring_strength_is_zero(self):
         endstop = self.ffb_task.split("// 5. Endstop eletrônico", 1)[1].split(

@@ -116,6 +116,9 @@ public:
 
 	bool isActive();
 	void setActive(bool active);
+	void setPaused(bool paused);
+	bool isPaused() const { return effects_paused_; }
+	void noteEffectStartedWhilePaused(FFB_Effect* effect, uint32_t start_tick);
 	// Caller holds EffectsStateGuard through calculation and output commit.
 	void calculateEffects(std::vector<std::unique_ptr<Axis>> &axes);
 	virtual void setFilters(FFB_Effect* effect);
@@ -196,6 +199,7 @@ private:
 
 	// FFB status
 	bool effects_active = false; // If FFB is on
+	bool effects_paused_ = false; // PID Pause freezes effect clocks until Continue
 	uint32_t effects_used = 0;
 	std::array<effect_stat_t,12> effects_stats; // [0..12 effect types]
 	std::array<effect_stat_t,12> effects_statslast; // [0..12 effect types]

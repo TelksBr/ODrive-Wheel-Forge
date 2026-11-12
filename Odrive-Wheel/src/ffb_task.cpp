@@ -296,8 +296,9 @@ public:
     }
 
     void update() {
+        const bool had_previous_speed = hasLastUpdate_;
         const uint32_t sample_time_us = micros();
-        uint32_t elapsed_us = hasLastUpdate_ ? sample_time_us - lastUpdateUs_ : 1000u;
+        uint32_t elapsed_us = had_previous_speed ? sample_time_us - lastUpdateUs_ : 1000u;
         if (elapsed_us == 0) elapsed_us = 1u;
         lastUpdateUs_ = sample_time_us;
         hasLastUpdate_ = true;
@@ -354,7 +355,7 @@ public:
         // low-pass de 1ª ordem (~100 Hz @ 1 kHz) pra suavizar os degraus
         // residuais da PLL antes de multiplicar pelos gains de inertia.
         const float accelAlpha = dt / (dt + accelFilterTauSeconds_);
-        float raw_accel = (new_speed - metrics_.speed) / dt;
+        const float raw_accel = had_previous_speed ? (new_speed - metrics_.speed) / dt : 0.0f;
         accelLpf_ += accelAlpha * (raw_accel - accelLpf_);
 
         metrics_.posDegrees = degrees;

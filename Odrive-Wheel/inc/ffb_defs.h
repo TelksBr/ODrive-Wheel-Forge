@@ -340,7 +340,13 @@ typedef struct
 
 	std::unique_ptr<Biquad> filter[MAX_AXIS] = { nullptr };  // Optional filter
 	uint16_t startDelay = 0;
-	uint32_t startTime = 0;	  // Elapsed time in ms before effect starts
+	uint32_t startTime = 0;	  // Base tick for pending delay or current effect phase
+	bool startDelayPending = false;	  // Consume the configured delay once per Start operation
+	uint16_t pendingStartDelay = 0;	  // Delay captured by the current Start operation
+	uint32_t pauseStartTime = 0;	  // Tick when this effect's playback clock was paused
+	bool pauseClockPending = false;	  // Shift effect clocks once when PID Continue resumes playback
+	uint16_t phaseElapsedMs = 0;	  // Infinite periodic phase time modulo period
+	uint32_t phaseLastTick = 0;	  // Tick used to advance the periodic phase accumulator
 	uint16_t samplePeriod = 0;
 	uint8_t loopsRemaining = 1;
 	bool useEnvelope = false;

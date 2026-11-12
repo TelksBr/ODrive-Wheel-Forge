@@ -100,6 +100,40 @@ void EffectsCalculator::setActive(bool active)
 	setClipLed(active);
 }
 
+void EffectsCalculator::setPaused(bool paused)
+{
+	if (effects_paused_ == paused) return;
+	const uint32_t now_ms = HAL_GetTick();
+	if (paused) {
+		effects_paused_ = true;
+		for (FFB_Effect& effect : effects) {
+			if (effect.state != EFFECT_STATE_INACTIVE) {
+				effect.pauseStartTime = now_ms;
+				effect.pauseClockPending = true;
+			}
+		}
+		return;
+	}
+
+	for (FFB_Effect& effect : effects) {
+		if (effect.state != EFFECT_STATE_INACTIVE && effect.pauseClockPending) {
+			const uint32_t paused_ms = now_ms - effect.pauseStartTime;
+			effect.startTime += paused_ms;
+			effect.phaseLastTick += paused_ms;
+			effect.pauseClockPending = false;
+		}
+	}
+	effects_paused_ = false;
+}
+
+void EffectsCalculator::noteEffectStartedWhilePaused(FFB_Effect* effect, uint32_t start_tick)
+{
+	if (effects_paused_ && effect != nullptr) {
+		effect->pauseStartTime = start_tick;
+		effect->pauseClockPending = true;
+	}
+}
+
 void EffectsCalculator::updateSamplerate(float newSamplerate){
 	EffectsStateGuard state_lock(*this);
 	this->calcfrequency = newSamplerate;
@@ -134,7 +168,47 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
 		axis->calculateAxisEffects(isActive());
 	}
 
+	// Use one coherent time snapshot for every effect in this output sample.
+	const uint32_t now_ms = HAL_GetTick();
+	auto advanceEffectClock = [now_ms](FFB_Effect *effect) {
+		if (effect->state == EFFECT_STATE_INACTIVE) return false;
+
+		if (effect->startDelayPending) {
+			const uint32_t delay_elapsed_ms = now_ms - effect->startTime;
+			if (delay_elapsed_ms < effect->pendingStartDelay) return false;
+			effect->startTime += effect->pendingStartDelay;
+			effect->startDelayPending = false;
+			// Periodic phase begins at the scheduled activation tick, even if
+			// actuator output was disabled while the delay elapsed.
+			effect->phaseLastTick = effect->startTime;
+		}
+
+		const bool periodic = effect->type == FFB_EFFECT_SQUARE ||
+			effect->type == FFB_EFFECT_TRIANGLE ||
+			effect->type == FFB_EFFECT_SAWTOOTHUP ||
+			effect->type == FFB_EFFECT_SAWTOOTHDOWN ||
+			effect->type == FFB_EFFECT_SINE;
+		if (periodic && effect->duration == FFB_EFFECT_DURATION_INFINITE) {
+			const uint32_t period_ms = effect->period;
+			const uint32_t elapsed_since_phase_tick_ms = now_ms - effect->phaseLastTick;
+			effect->phaseLastTick = now_ms;
+			const uint32_t phase_advance_ms = elapsed_since_phase_tick_ms % period_ms;
+			const uint32_t phase_sum_ms = effect->phaseElapsedMs + phase_advance_ms;
+			effect->phaseElapsedMs = (uint16_t)(phase_sum_ms >= period_ms
+				? phase_sum_ms - period_ms
+				: phase_sum_ms);
+		}
+		return true;
+	};
+
 	if(!isActive()){
+		// Actuator disable allows effect time to continue, but PID Pause freezes
+		// finite durations, start delays and periodic phase until Continue.
+		if (!effects_paused_) {
+			for (FFB_Effect &effect : effects) {
+				advanceEffectClock(&effect);
+			}
+		}
 		for (auto &axis : axes) {
 			axis->setEffectTorque(0);
 		}
@@ -145,8 +219,6 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
 	int axisCount = axes.size();
 	float forces[MAX_AXIS] = {0.0f};
 	const float globalGainScale = (float)global_gain / 255.0f;
-	// Use one coherent time snapshot for every effect in this output sample.
-	const uint32_t now_ms = HAL_GetTick();
 
 	for (uint8_t i = 0; i < effects_stats.size(); i++)
 	{
@@ -157,13 +229,9 @@ void EffectsCalculator::calculateEffects(std::vector<std::unique_ptr<Axis>> &axe
 	{
 		FFB_Effect *effect = &effects[fxi];
 
+		if (!advanceEffectClock(effect)) continue;
 		if (effect->state != EFFECT_STATE_INACTIVE) {
-			// HID startDelay applies to finite and infinite effects. The signed
-			// modular comparison is valid because the delay is at most 65535 ms.
 			const uint32_t elapsed_ms = now_ms - effect->startTime;
-			if ((int32_t)elapsed_ms < 0) {
-				continue;
-			}
 			// Finite effects expire after their duration; infinite effects do not.
 			if (effect->duration != FFB_EFFECT_DURATION_INFINITE && effect->duration != 0) {
 				if (elapsed_ms >= effect->duration)
@@ -292,11 +360,15 @@ float EffectsCalculator::calcNonConditionEffectForce(FFB_Effect *effect, uint32_
 		// Period defaults to 1 ms and HID updates clamp it to [1, 32767].
 		uint32_t period_ms = effect->period;
 		uint32_t period_us = period_ms * 1000;
-		// Use the same wrap-safe millisecond clock as effect start/duration.
-		// Taking modulo before scaling keeps the phase stable across micros()
-		// wrap every 71 minutes, even for infinite periodic effects.
-		uint32_t elapsed_ms = now_ms - effect->startTime;
-		uint32_t elapsed_phase_us = (elapsed_ms % period_ms) * 1000u;
+		// Infinite effects accumulate phase modulo the period so a full HAL tick
+		// rollover cannot reset their waveform. Finite loops still rebase startTime.
+		uint32_t elapsed_phase_us;
+		if (effect->duration == FFB_EFFECT_DURATION_INFINITE) {
+			elapsed_phase_us = (uint32_t)effect->phaseElapsedMs * 1000u;
+		} else {
+			const uint32_t elapsed_ms = now_ms - effect->startTime;
+			elapsed_phase_us = (elapsed_ms % period_ms) * 1000u;
+		}
 		const uint32_t phase_centidegrees = effect->phase;
 		// 1000 / 36000 reduces exactly to 1 / 36. The HID period is capped
 		// at 32767 ms, so the maximum product is 35999 * 32767 < UINT32_MAX.

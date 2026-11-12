@@ -95,14 +95,24 @@ bool HidFFB::HID_SendReport(uint8_t *report,uint16_t len){
  * Sends a status report for a specific effect
  */
 void HidFFB::sendStatusReport(uint8_t effect){
-	this->reportFFBStatus.status = HID_ACTUATOR_POWER;
-	if(this->ffb_active){
-		this->reportFFBStatus.status |= HID_ENABLE_ACTUATORS;
-		this->reportFFBStatus.status |= HID_EFFECT_PLAYING;
-	}else{
-		this->reportFFBStatus.status |= HID_EFFECT_PAUSE;
-	}
+	(void)effect;
+	updateStatusReport();
 	HID_SendReport(reinterpret_cast<uint8_t*>(&this->reportFFBStatus), sizeof(reportFFB_status_t));
+}
+
+void HidFFB::updateStatusReport(){
+	uint8_t status = HID_ACTUATOR_POWER;
+	if (actuators_enabled) status |= HID_ENABLE_ACTUATORS;
+	if (effects_calc->isPaused()) status |= HID_EFFECT_PAUSE;
+	if (ffb_active) {
+		for (const FFB_Effect& effect : effects) {
+			if (effect.state != 0 && !effect.startDelayPending) {
+				status |= HID_EFFECT_PLAYING;
+				break;
+			}
+		}
+	}
+	reportFFBStatus.status = status;
 }
 
 
@@ -224,8 +234,12 @@ uint16_t HidFFB::hidGet(uint8_t report_id, hid_report_type_t report_type,uint8_t
 		// Bug 2: DirectInput PID State Report (Report ID 2)
 		// Chamado por jogos e utilitários (ex: Forza, GetForceFeedbackState) para
 		// checar se atuadores e alimentação estão ativos (DIGFFS_ACTUATORSON | DIGFFS_POWERON).
+		{
+			EffectsStateGuard state_lock(*effects_calc);
+			updateStatusReport();
 		buffer[0] = this->reportFFBStatus.status;
 		return 1;
+		}
 	case HID_ID_BLKLDREP:
 		// Notice: first byte ID is not present in the reply buffer because it is handled by tinyusb internally!
 		{
@@ -246,6 +260,7 @@ uint16_t HidFFB::hidGet(uint8_t report_id, hid_report_type_t report_type,uint8_t
 }
 
 void HidFFB::start_FFB(){
+	if (effects_calc->isPaused() || !actuators_enabled) return;
 #ifdef DEBUGLOG
 	CommandHandler::logSerialDebug("FFB on");
 #endif
@@ -279,9 +294,11 @@ void HidFFB::set_filters(FFB_Effect *effect){
 void HidFFB::ffb_control(uint8_t cmd){
 
 	if(cmd & 0x01){ // Enable Actuators
+		actuators_enabled = true;
 		start_FFB();
 	}
 	if(cmd & 0x02){ // Disable Actuators
+		actuators_enabled = false;
 		stop_FFB();
 	}
 	if(cmd & 0x04){ // Stop All Effects (Bug 6: para todos os efeitos ativos)
@@ -290,15 +307,21 @@ void HidFFB::ffb_control(uint8_t cmd){
 		}
 	}
 	if(cmd & 0x08){ // Reset
+		effects_calc->setPaused(false);
+		actuators_enabled = true;
 		stop_FFB();
 		reset_ffb();
+		start_FFB();
 	}
 	if(cmd & 0x10){ // Pause
+		effects_calc->setPaused(true);
 		stop_FFB();
 	}
 	if(cmd & 0x20){ // Continue
+		effects_calc->setPaused(false);
 		start_FFB();
 	}
+	sendStatusReport(0);
 }
 
 
@@ -361,7 +384,6 @@ void HidFFB::set_effect(FFB_SetEffect_t* effect){
 	FFB_Effect* effect_p = &effects[index-1];
 
 	if (effect_p->type != effect->effectType){
-		effect_p->startTime = 0;
 		set_filters(effect_p);
 	}
 
@@ -426,7 +448,7 @@ void HidFFB::set_effect(FFB_SetEffect_t* effect){
 		effect_p->duration = effect->duration;
 	}
 	effect_p->startDelay = effect->startDelay;
-	if(!ffb_active)
+	if(!ffb_active && actuators_enabled && !effects_calc->isPaused())
 		start_FFB();
 
 	sendStatusReport(effect->effectBlockIndex);
@@ -490,6 +512,7 @@ void HidFFB::set_effect_operation(FFB_EffOp_Data_t* report){
 	uint8_t id = report->effectBlockIndex-1;
 	if(report->state == 3){
 		effects[id].state = 0; //Stop
+		effects[id].startDelayPending = false;
 		effects[id].loopsRemaining = 0;
 #ifdef DEBUGLOG
 		CommandHandler::logSerialDebug("Stop effect: " + std::to_string(id));
@@ -512,11 +535,19 @@ void HidFFB::set_effect_operation(FFB_EffOp_Data_t* report){
 #ifdef DEBUGLOG
 		CommandHandler::logSerialDebug("Start effect: " + std::to_string(id));
 #endif
-		effects[id].startTime = HAL_GetTick() + effects[id].startDelay;
+		const uint32_t start_tick = HAL_GetTick();
+		effects[id].startTime = start_tick;
+		effects[id].pendingStartDelay = effects[id].startDelay;
+		effects[id].startDelayPending = effects[id].pendingStartDelay != 0;
+		effects[id].phaseElapsedMs = 0;
+		effects[id].phaseLastTick = start_tick;
 		effects[id].loopsRemaining = report->loopCount;
 		effects[id].state = 1; //Start
+		effects[id].pauseClockPending = false;
+		effects_calc->noteEffectStartedWhilePaused(&effects[id], start_tick);
 	}
 	this->effects_calc->logEffectState(effects[id].type,effects[id].state);
+	sendStatusReport(report->effectBlockIndex);
 }
 
 
@@ -549,7 +580,13 @@ void HidFFB::set_periodic(FFB_SetPeriodic_Data_t* report){
 	}
 	FFB_Effect* effect = &effects[report->effectBlockIndex-1];
 
-	effect->period = clip<uint32_t,uint32_t>(report->period,1,0x7fff); // Period is never 0
+	const uint16_t old_period = effect->period;
+	const uint16_t new_period = clip<uint32_t,uint32_t>(report->period,1,0x7fff); // Period is never 0
+	if (old_period != 0 && old_period != new_period) {
+		// Keep the phase fraction continuous when a running effect changes frequency.
+		effect->phaseElapsedMs = (uint16_t)((uint32_t)effect->phaseElapsedMs * new_period / old_period);
+	}
+	effect->period = new_period;
 	effect->periodScale = 1.0f / ((float)effect->period * 1000.0f);
 	effect->magnitude = report->magnitude;
 	effect->offset = report->offset;
