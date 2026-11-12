@@ -739,6 +739,29 @@ class FirmwareSafetyContractTests(unittest.TestCase):
         self.assertEqual(0.0, 0.0)
         self.assertEqual((255 + 1) / 256.0, 1.0)
 
+    def test_hid_per_effect_gain_scales_every_conditional_effect(self):
+        component = function_body(self.effects, "float EffectsCalculator::calcComponentForce(")
+        self.assertIn("effect->gain", component)
+        self.assertRegex(component, r"effectGainScale\s*=\s*\(float\)effect->gain\s*/\s*255\.0f")
+
+        branch_ranges = (
+            ("FFB_EFFECT_SPRING", "FFB_EFFECT_FRICTION", 1),
+            ("FFB_EFFECT_FRICTION", "FFB_EFFECT_DAMPER", 2),
+            ("FFB_EFFECT_DAMPER", "FFB_EFFECT_INERTIA", 2),
+            ("FFB_EFFECT_INERTIA", "default:", 2),
+        )
+        for effect_type, next_type, expected_uses in branch_ranges:
+            with self.subTest(effect=effect_type):
+                branch = component.split(f"case {effect_type}", 1)[1].split(f"case {next_type}", 1)[0]
+                self.assertEqual(branch.count("effectGainScale"), expected_uses)
+
+        # HID Set Effect Gain is a normalized multiplier: zero mutes this
+        # effect, half gain halves its torque, and 255 preserves full output.
+        full_effect_torque = 12000.0
+        expected_outputs = ((0, 0.0), (128, 6023.529411764706), (255, 12000.0))
+        for hid_gain, expected in expected_outputs:
+            self.assertAlmostEqual(full_effect_torque * hid_gain / 255, expected)
+
     def test_condition_blocks_keep_hid_axis_slots_separate_from_physical_axes(self):
         handler = self.hid.split("void HidFFB::set_condition", 1)[1].split("void HidFFB::set_effect_operation", 1)[0]
         self.assertIn("std::min<uint8_t>((uint8_t)(MAX_AXIS - 1)", handler)

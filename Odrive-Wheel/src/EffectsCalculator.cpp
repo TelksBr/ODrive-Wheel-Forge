@@ -348,6 +348,10 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 	metric_t *metrics = axes[axis]->getMetrics();
 
 	float angle_ratio = effect->axisMagnitudes[axis];
+	// HID Set Effect Gain scales every effect's magnitude, including condition
+	// effects. Waveform effects receive it in calcNonConditionEffectForce();
+	// apply the same normalized gain here to spring/damper/inertia/friction.
+	const float effectGainScale = (float)effect->gain / 255.0f;
 
 	switch (effect->type)
 	{
@@ -377,7 +381,7 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 	case FFB_EFFECT_SPRING:
 	{
 		float pos = metrics->pos_scaled_16b;
-		result_torque -= calcConditionEffectForce(effect, pos, gain.spring, con_idx, scaler.spring, angle_ratio);
+		result_torque -= effectGainScale * calcConditionEffectForce(effect, pos, gain.spring, con_idx, scaler.spring, angle_ratio);
 		break;
 	}
 
@@ -435,9 +439,9 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 			const float frictionGain = gain.friction == 0 ? 0.0f : (float)(gain.friction + 1) / 256.0f;
 			float force_raw = frictionGain * force * angle_ratio * scaler.friction;
 			if (effect->filter[axis] != nullptr) {
-				result_torque -= effect->filter[axis]->process(force_raw);
+				result_torque -= effectGainScale * effect->filter[axis]->process(force_raw);
 			} else {
-				result_torque -= force_raw;
+				result_torque -= effectGainScale * force_raw;
 			}
 		}
 
@@ -449,9 +453,9 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 		float speed = metrics->speed * INTERNAL_SCALER_DAMPER;
 		float force_raw = calcConditionEffectForce(effect, speed, gain.damper, con_idx, scaler.damper, angle_ratio);
 		if (effect->filter[axis] != nullptr) {
-			result_torque -= effect->filter[axis]->process(force_raw);
+			result_torque -= effectGainScale * effect->filter[axis]->process(force_raw);
 		} else {
-			result_torque -= force_raw;
+			result_torque -= effectGainScale * force_raw;
 		}
 
 		break;
@@ -462,9 +466,9 @@ float EffectsCalculator::calcComponentForce(FFB_Effect *effect, float forceVecto
 		float accel = metrics->accel * INTERNAL_SCALER_INERTIA;
 		float force_raw = calcConditionEffectForce(effect, accel, gain.inertia, con_idx, scaler.inertia, angle_ratio); // Bump *60 the inertia feedback
 		if (effect->filter[axis] != nullptr) {
-			result_torque -= effect->filter[axis]->process(force_raw);
+			result_torque -= effectGainScale * effect->filter[axis]->process(force_raw);
 		} else {
-			result_torque -= force_raw;
+			result_torque -= effectGainScale * force_raw;
 		}
 
 		break;
